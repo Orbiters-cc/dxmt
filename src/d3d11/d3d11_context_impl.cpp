@@ -34,6 +34,7 @@
 #include "dxmt_buffer.hpp"
 #include "dxmt_context.hpp"
 #include "dxmt_format.hpp"
+#include "dxmt_otl.h"
 #include "dxmt_ring_bump_allocator.hpp"
 #include "dxmt_staging.hpp"
 #include "d3d11_resource.hpp"
@@ -699,7 +700,7 @@ public:
   void
   STDMETHODCALLTYPE
   ClearUnorderedAccessViewUint(D3D11UnorderedAccessView *pUAV, const UINT Values[4]) {
-    InvalidateCurrentPass(true);
+    InvalidateCurrentPass(true, OTL_WHY_CLEAR_UAV);
     SwitchToComputeEncoder();
     D3D11_UNORDERED_ACCESS_VIEW_DESC desc;
     pUAV->GetDesc(&desc);
@@ -755,7 +756,7 @@ public:
           break;
         }
       });
-    InvalidateCurrentPass();
+    InvalidateCurrentPass(false, OTL_WHY_CLEAR_UAV);
   }
 
   void
@@ -769,7 +770,7 @@ public:
   void
   STDMETHODCALLTYPE
   ClearUnorderedAccessViewFloat(D3D11UnorderedAccessView *pUAV, const FLOAT Values[4])  {
-    InvalidateCurrentPass(true);
+    InvalidateCurrentPass(true, OTL_WHY_CLEAR_UAV);
     SwitchToComputeEncoder();
     D3D11_UNORDERED_ACCESS_VIEW_DESC desc;
     pUAV->GetDesc(&desc);
@@ -811,7 +812,7 @@ public:
           break;
         }
       });
-    InvalidateCurrentPass();
+    InvalidateCurrentPass(false, OTL_WHY_CLEAR_UAV);
   }
 
   void
@@ -854,7 +855,7 @@ public:
         }
         return ClearRenderTargetView(rtv, Color);
       }
-      InvalidateCurrentPass(true);
+      InvalidateCurrentPass(true, OTL_WHY_CLEAR_VIEW);
       EmitST([texture = rtv->texture(), view = rtv->viewId(), plane = rtv->description().DepthPlane](ArgumentEncodingContext &enc) {
         enc.clear_rt_cmd.begin(texture, view, plane);
       });
@@ -895,7 +896,7 @@ public:
         }
         return ClearDepthStencilView(dsv, D3D11_CLEAR_DEPTH, color[0], 0);
       }
-      InvalidateCurrentPass(true);
+      InvalidateCurrentPass(true, OTL_WHY_CLEAR_VIEW);
       EmitST([texture = dsv->texture(), view = dsv->viewId()](ArgumentEncodingContext &enc) {
         enc.clear_rt_cmd.begin(texture, view, 0, D3D11_CLEAR_DEPTH);
       });
@@ -918,7 +919,7 @@ public:
     }
 
     if (auto expected = com_cast<ID3D11UnorderedAccessView>(pView)) {
-      InvalidateCurrentPass(true);
+      InvalidateCurrentPass(true, OTL_WHY_CLEAR_VIEW);
       auto uav = static_cast<D3D11UnorderedAccessView *>(expected.ptr());
       D3D11_UNORDERED_ACCESS_VIEW_DESC1 desc;
       uav->GetDesc1(&desc);
@@ -1018,7 +1019,7 @@ public:
       ERR("ResolveSubresource: invalid format ", Format);
       return;
     }
-    InvalidateCurrentPass();
+    InvalidateCurrentPass(false, OTL_WHY_RESOLVE);
     EmitOP([src = static_cast<D3D11ResourceCommon *>(pSrcResource)->texture(),
             dst = static_cast<D3D11ResourceCommon *>(pDstResource)->texture(),
             dst_level = DstSubresource % Dst.Texture2DDesc.MipLevels,
@@ -1253,7 +1254,7 @@ public:
           cmd.dst = dst->buffer();
           cmd.dst_offset = copy_offset + dst_offset;
         });
-        promote_flush = true;
+        PromoteFlush(OTL_WHY_STAGING_WRITE);
       } else if (auto bindable = GetResourceCommon(pDstResource)) {
         auto [staging_buffer, offset] = AllocateStagingBuffer(copy_len, 16);
         staging_buffer.updateContents(offset, pSrcData, copy_len);
@@ -2859,6 +2860,7 @@ public:
       return;
 
     bool should_invalidate_pass = false;
+    bool otl_hazard = false; // (the part of it that the timeline tells apart)
 
     if (NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL) {
       if (!ValidateSetRenderTargets(NumRTVs, ppRenderTargetViews, pDepthStencilView)) {
@@ -2944,12 +2946,13 @@ public:
         // No check on SO as SO^UAV = 1
 
         if (NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL)
-          should_invalidate_pass |= OMResolveRTVHazard(pUAV);
+          otl_hazard |= OMResolveRTVHazard(pUAV);
       }
     }
+    should_invalidate_pass |= otl_hazard;
 
     if (should_invalidate_pass) {
-      InvalidateCurrentPass();
+      InvalidateCurrentPass(false, otl_hazard ? OTL_WHY_HAZARD : OTL_WHY_TARGETS);
     }
   }
 
@@ -3863,7 +3866,7 @@ public:
           cmd.dst = dst->buffer();
           cmd.dst_offset = DstX + dst_offset;
         });
-        promote_flush = true;
+        PromoteFlush(OTL_WHY_READBACK);
       } else if (auto src = GetResourceCommon(pSrcResource)) {
         // copy from device to staging
         SwitchToBlitEncoder(CommandBufferState::ReadbackBlitEncoderActive);
@@ -3879,7 +3882,7 @@ public:
           cmd.dst = dst->buffer();
           cmd.dst_offset = DstX + dst_offset;
         });
-        promote_flush = true;
+        PromoteFlush(OTL_WHY_READBACK);
       } else {
         UNREACHABLE
       }
@@ -3968,10 +3971,10 @@ public:
             }
           }
         });
-        promote_flush = true;
+        PromoteFlush(OTL_WHY_READBACK);
       } else if (auto src = GetTexture(cmd.pSrc)) {
         if (cmd.DstFormat.Flag & MTL_DXGI_FORMAT_EMULATED_LINEAR_DEPTH_STENCIL) {
-          InvalidateCurrentPass(true);
+          InvalidateCurrentPass(true, OTL_WHY_READBACK);
           UseCopyDestination(staging_dst);
           EmitOP([src_ = std::move(src), dst_ = std::move(staging_dst),
                   cmd = std::move(cmd)](ArgumentEncodingContext &enc) {
@@ -3980,7 +3983,7 @@ public:
                 dst_->bytesPerImage, cmd.DstFormat.Flag & MTL_DXGI_FORMAT_EMULATED_D24
             );
           });
-          promote_flush = true;
+          PromoteFlush(OTL_WHY_READBACK);
           return;
         }
         SwitchToBlitEncoder(CommandBufferState::ReadbackBlitEncoderActive);
@@ -4003,14 +4006,14 @@ public:
           cmd_cpbuf.bytes_per_row = dst_->bytesPerRow;
           cmd_cpbuf.bytes_per_image = dst_->bytesPerImage;
         });
-        promote_flush = true;
+        PromoteFlush(OTL_WHY_READBACK);
       } else {
         UNREACHABLE
       }
     } else if (auto dst = GetTexture(cmd.pDst)) {
       if (auto staging_src = GetStagingResource(cmd.pSrc, cmd.SrcSubresource)) {
         if (cmd.SrcFormat.Flag & MTL_DXGI_FORMAT_EMULATED_LINEAR_DEPTH_STENCIL) {
-          InvalidateCurrentPass(true);
+          InvalidateCurrentPass(true, OTL_WHY_UPLOAD);
           UseCopySource(staging_src);
           EmitOP([dst_ = std::move(dst), src_ = std::move(staging_src),
                   cmd = std::move(cmd)](ArgumentEncodingContext &enc) {
@@ -4296,7 +4299,7 @@ public:
           }
         }
       });
-      promote_flush = true;
+      PromoteFlush(OTL_WHY_STAGING_WRITE);
     } else {
       UNREACHABLE
     }
@@ -4338,6 +4341,23 @@ public:
 
   bool promote_flush = false;
 
+  // The timeline's (dxmt_otl.h), while it is on: what asked for the commit to come, and when; the targets of the pass last
+  // begun; what commits; whether a render pass was open as it did.
+  uint32_t otl_asked_ = 0, otl_why_ = 0;
+  uint64_t otl_asked_at_ = 0, otl_colour_ = 0, otl_colour_texture_ = 0, otl_depth_texture_ = 0;
+  bool otl_open_ = false;
+  virtual void otlPassEnded(uint32_t why) {}
+
+  /* The pass ends no later than it would; the next one that begins commits first. */
+  void
+  PromoteFlush(uint32_t why) {
+    if (otl_active() && !promote_flush) {
+      otl_asked_ = why;
+      otl_asked_at_ = otl_now();
+    }
+    promote_flush = true;
+  }
+
   /**
   Render pass can be invalidated by reasons:
   - render target changes (including depth stencil)
@@ -4347,7 +4367,16 @@ public:
   Return value indicates if a commit happens
   */
   bool
-  InvalidateCurrentPass(bool defer_commit = false) {
+  InvalidateCurrentPass(bool defer_commit = false, uint32_t why = OTL_WHY_OTHER) {
+    if (otl_active()) {
+      otl_why_ = why;
+      otl_open_ = cmdbuf_state == CommandBufferState::RenderEncoderActive ||
+                  cmdbuf_state == CommandBufferState::RenderPipelineReady ||
+                  cmdbuf_state == CommandBufferState::TessellationRenderPipelineReady ||
+                  cmdbuf_state == CommandBufferState::GeometryRenderPipelineReady;
+      if (otl_open_)
+        otlPassEnded(why);
+    }
     switch (cmdbuf_state) {
     case CommandBufferState::Idle:
       break;
@@ -4425,7 +4454,7 @@ public:
 
   void
   ClearRenderTargetView(D3D11RenderTargetView *pRenderTargetView, const FLOAT ColorRGBA[4]) {
-    InvalidateCurrentPass();
+    InvalidateCurrentPass(false, OTL_WHY_CLEAR_COLOUR);
     auto clear_color = WMTClearColor{ColorRGBA[0], ColorRGBA[1], ColorRGBA[2], ColorRGBA[3]};
     auto &props = pRenderTargetView->description();
 
@@ -4439,7 +4468,7 @@ public:
   ClearDepthStencilView(D3D11DepthStencilView *pDepthStencilView, UINT ClearFlags, FLOAT Depth, UINT8 Stencil) {
     if (ClearFlags == 0)
       return;
-    InvalidateCurrentPass();
+    InvalidateCurrentPass(false, OTL_WHY_CLEAR_DEPTH);
     auto &props = pDepthStencilView->description();
 
     EmitOP([texture = pDepthStencilView->texture(), view = pDepthStencilView->viewId(),
@@ -4465,7 +4494,7 @@ public:
       return true;
     if (cmdbuf_state == CommandBufferState::RenderEncoderActive)
       return true;
-    InvalidateCurrentPass();
+    InvalidateCurrentPass(false, OTL_WHY_DRAW);
 
     // set dirty state
     state_.ShaderStages[PipelineStage::Vertex].ConstantBuffers.set_dirty();
@@ -4556,6 +4585,17 @@ public:
         uav_only = true;
       }
 
+      if (otl_active()) {
+        auto &rtv = state_.OutputMerger.RTVs[0];
+        otl_colour_ = rtv ? otl_attachment(
+                                rtv->pixelFormat(), sample_count, WMTLoadActionLoad, WMTStoreActionStore, 0, 0,
+                                render_target_width, render_target_height
+                            )
+                          : 0;
+        otl_colour_texture_ = rtv ? reinterpret_cast<uintptr_t>(rtv->texture().ptr()) : 0;
+        otl_depth_texture_ = reinterpret_cast<uintptr_t>(dsv_info.Texture.ptr());
+      }
+
       auto allocated_encoder_argbuf_size = std::make_unique<uint64_t>(0);
       allocated_encoder_argbuf_size_ = allocated_encoder_argbuf_size.get();
 
@@ -4624,7 +4664,12 @@ public:
     /**
     Don't flush if it's a readback/upload blit pass
      */
-    InvalidateCurrentPass(BlitKind != CommandBufferState::BlitEncoderActive);
+    InvalidateCurrentPass(
+        BlitKind != CommandBufferState::BlitEncoderActive,
+        BlitKind == CommandBufferState::BlitEncoderActive     ? OTL_WHY_COPY
+        : BlitKind == CommandBufferState::UpdateBlitEncoderActive ? OTL_WHY_UPLOAD
+                                                                  : OTL_WHY_READBACK
+    );
 
     EmitST([](ArgumentEncodingContext &enc) { enc.startBlitPass(); });
 
@@ -4640,7 +4685,7 @@ public:
       return;
     if (cmdbuf_state == CommandBufferState::ComputeEncoderActive)
       return;
-    InvalidateCurrentPass();
+    InvalidateCurrentPass(false, OTL_WHY_DISPATCH);
 
     // set dirty state
     state_.ShaderStages[PipelineStage::Compute].ConstantBuffers.set_dirty();
@@ -5172,7 +5217,7 @@ public:
   }
 
   void ResetEncodingContextState() {
-    InvalidateCurrentPass(true);
+    InvalidateCurrentPass(true, OTL_WHY_STATE);
     // TODO: optimize by clearing only bound resource
     EmitST([](ArgumentEncodingContext& enc) {
       enc.clearState();
@@ -5377,7 +5422,7 @@ public:
       // as they are not expected to be created frequently
     }
 
-    ctx_->InvalidateCurrentPass();
+    ctx_->InvalidateCurrentPass(false, OTL_WHY_UPSCALE);
     ctx_->EmitOP([input = std::move(input), output = std::move(output),
                   depth = std::move(depth),
                   motion_vector = std::move(motion_vector),

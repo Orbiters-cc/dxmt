@@ -276,7 +276,7 @@ public:
         // even it's in a while loop
         // only the first flush will have effect
         // and the following calls are essentially no-op
-        Flush();
+        FlushFor(OTL_WHY_MAP_STAGING);
         TRACE("staging map block");
         auto& statistics = cmd_queue.CurrentFrameStatistics();
         auto t0 = clock::now();
@@ -365,11 +365,11 @@ public:
       if (ctx_state.has_dirty_op_since_last_event) {
         auto event_id = cmd_queue.GetNextEventSeqId();
         static_cast<MTLD3D11EventQuery *>(pAsync)->Issue(event_id);
-        InvalidateCurrentPass(true);
+        InvalidateCurrentPass(true, OTL_WHY_END_EVENT);
         EmitOP([event_id](ArgumentEncodingContext &enc) mutable {
           enc.signalEvent(event_id);
         });
-        promote_flush = true;
+        PromoteFlush(OTL_WHY_END_EVENT);
         ctx_state.has_dirty_op_since_last_event = false;
       } else {
         static_cast<MTLD3D11EventQuery *>(pAsync)->Issue(cmd_queue.GetCurrentEventSeqId());
@@ -382,7 +382,7 @@ public:
       // for each kept the queue's 32 chunks full (THE FINALS: about 150 command buffers per frame). A GetData without
       // D3D11_ASYNC_GETDATA_DONOTFLUSH still flushes while the result is not there.
       if (auto query = static_cast<MTLD3D11TimestampQuery *>(pAsync)->End()) {
-        InvalidateCurrentPass(true);
+        InvalidateCurrentPass(true, OTL_WHY_END_TIMESTAMP);
         EmitOP([query = Rc(query)](ArgumentEncodingContext &enc) mutable {
           enc.sampleTimestamp(std::move(query));
         });
@@ -395,7 +395,7 @@ public:
         EmitST([query = Rc(query)](ArgumentEncodingContext &enc) mutable {
           enc.endVisibilityResultQuery(std::move(query));
         });
-      promote_flush = true;
+      PromoteFlush(OTL_WHY_END_OCCLUSION);
       break;
     }
     case D3D11_QUERY_PIPELINE_STATISTICS: {
@@ -419,6 +419,7 @@ public:
       return E_INVALIDARG;
 
     HRESULT hr = S_FALSE;
+    uint32_t otl_why = OTL_WHY_GETDATA;
 
     D3D11_QUERY_DESC desc;
     ((ID3D11Query *)pAsync)->GetDesc(&desc);
@@ -429,6 +430,8 @@ public:
       case EventState::Pending:
         break;
       case EventState::Stall:
+        if (GetDataFlags & D3D11_ASYNC_GETDATA_DONOTFLUSH)
+          otl_why = OTL_WHY_GETDATA_STALL;
         GetDataFlags &= ~D3D11_ASYNC_GETDATA_DONOTFLUSH;
         break;
       case EventState::Signaled:
@@ -484,7 +487,7 @@ public:
     }
     if (hr == S_FALSE && (GetDataFlags & D3D11_ASYNC_GETDATA_DONOTFLUSH) == 0) {
       cmd_queue.CurrentFrameStatistics().event_stall++;
-      Flush();
+      FlushFor(otl_why);
     }
     return hr;
   }
@@ -500,10 +503,7 @@ public:
   Flush1(D3D11_CONTEXT_TYPE Type, HANDLE hEvent) override {
     std::lock_guard<d3d11_device_mutex> lock(mutex);
 
-    if (ctx_state.has_dirty_op_since_last_event || promote_flush) {
-      InvalidateCurrentPass(true);
-      Commit();
-    }
+    FlushFor(OTL_WHY_FLUSH);
     if (hEvent) {
       auto shared_event_listener = cmd_queue.GetSharedEventListener();
       MTLSharedEvent_setWin32EventAtValue(
@@ -513,7 +513,23 @@ public:
   }
 
   void PrepareFlush() override {
-    InvalidateCurrentPass(true);
+    InvalidateCurrentPass(true, OTL_WHY_PRESENT);
+  }
+
+  /* What Flush() does, for whatever calls it. */
+  void
+  FlushFor(uint32_t why) {
+    if (ctx_state.has_dirty_op_since_last_event || promote_flush) {
+      InvalidateCurrentPass(true, why);
+      Commit();
+    }
+  }
+
+  void
+  otlPassEnded(uint32_t why) override {
+    if (otl_passes && cmd_queue.otl_group_ % otl_passes == 0)
+      otl_put(otl_now(), OTL_D_PASS_ENDED, why, cmd_queue.otl_id_, cmd_queue.CurrentSeqId(), cmd_queue.otl_group_, otl_colour_,
+              otl_colour_texture_, otl_depth_texture_);
   }
 
   void
@@ -527,6 +543,10 @@ public:
     auto seq_id = ctx_state.cmd_queue.CurrentSeqId();
 
     promote_flush = cmdlist->promote_flush;
+    if (otl_active() && promote_flush) {
+      otl_asked_ = OTL_WHY_COMMAND_LIST;
+      otl_asked_at_ = otl_now();
+    }
 
     auto query_list = AllocateCommandData<Rc<VisibilityResultQuery>>(cmdlist->visibility_query_count);
     for (const auto &[query, index] : cmdlist->issued_visibility_query) {
@@ -592,7 +612,7 @@ public:
   virtual void
   WaitUntilGPUIdle() override {
     uint64_t seq = cmd_queue.CurrentSeqId();
-    if(!InvalidateCurrentPass())
+    if(!InvalidateCurrentPass(false, OTL_WHY_IDLE))
       Commit();
     cmd_queue.WaitCPUFence(seq);
   };
@@ -601,7 +621,15 @@ public:
   Commit() override {
     promote_flush = false;
     D3D11_ASSERT(cmdbuf_state == CommandBufferState::Idle);
+    const bool otl = otl_active();
+    const uint64_t otl_chunk = otl ? cmd_queue.CurrentSeqId() : 0, otl_at = otl ? otl_now() : 0;
     ctx_state.cmd_queue.CommitCurrentChunk();
+    if (otl) {
+      otl_put(otl_at, OTL_D_COMMIT, otl_why_ | otl_asked_ << 8 | uint32_t(otl_open_) << 16, cmd_queue.otl_id_, otl_chunk,
+              cmd_queue.otl_group_, otl_asked_at_, otl_now() - otl_at, otl_colour_);
+      otl_asked_ = 0;
+      otl_asked_at_ = 0;
+    }
     ctx_state.has_dirty_op_since_last_event = false;
   };
 
@@ -609,14 +637,14 @@ public:
     std::lock_guard<d3d11_device_mutex> lock(mutex);
     auto fence = static_cast<MTLD3D11Fence *>(pFence);
 
-    InvalidateCurrentPass();
+    InvalidateCurrentPass(false, OTL_WHY_SIGNAL);
     EmitOP([event = fence->event, Value](ArgumentEncodingContext &enc) mutable {
       enc.signalEvent(std::move(event), Value);
     });
     if (otl_active())
       otl_put(otl_now(), OTL_D_SIGNAL, 0, cmd_queue.CurrentSeqId(), reinterpret_cast<uintptr_t>(pFence), Value,
               fence->event.handle, cmd_queue.otl_id_, cmd_queue.otl_group_);
-    Flush();
+    FlushFor(OTL_WHY_SIGNAL);
     cmd_queue.otl_group_++;
 
     return S_OK;
@@ -626,7 +654,7 @@ public:
     std::lock_guard<d3d11_device_mutex> lock(mutex);
     auto fence = static_cast<MTLD3D11Fence *>(pFence);
 
-    Flush();
+    FlushFor(OTL_WHY_WAIT);
     EmitOP([event = fence->event, Value](ArgumentEncodingContext &enc) mutable {
       enc.waitEvent(std::move(event), Value);
     });
@@ -648,11 +676,11 @@ public:
       return DXGI_ERROR_INVALID_CALL;
     return resource->keyedMutex()->acquire(
         [&](uint64_t fence) {
-          InvalidateCurrentPass(true);
+          InvalidateCurrentPass(true, OTL_WHY_KEYED_MUTEX);
           EmitOP([event = resource->keyedMutex()->sharedEvent(), fence](ArgumentEncodingContext &enc) mutable {
             enc.waitEvent(std::move(event), fence);
           });
-          Flush();
+          FlushFor(OTL_WHY_KEYED_MUTEX);
         },
         Key, dwMilliseconds
     );
@@ -665,11 +693,11 @@ public:
       return DXGI_ERROR_INVALID_CALL;
     return resource->keyedMutex()->release(
         [&](uint64_t fence) {
-          InvalidateCurrentPass(true);
+          InvalidateCurrentPass(true, OTL_WHY_KEYED_MUTEX);
           EmitOP([event = resource->keyedMutex()->sharedEvent(), fence](ArgumentEncodingContext &enc) mutable {
             enc.signalEvent(std::move(event), fence);
           });
-          Flush();
+          FlushFor(OTL_WHY_KEYED_MUTEX);
         },
         Key
     );

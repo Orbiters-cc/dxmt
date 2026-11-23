@@ -17,6 +17,7 @@
  */
 
 #include "dxmt_context.hpp"
+#include "dxmt_otl.h"
 #include "Metal.hpp"
 #include "dxmt_command_queue.hpp"
 #include "dxmt_deptrack.hpp"
@@ -858,6 +859,32 @@ ArgumentEncodingContext::$$setEncodingContext(uint64_t seq_id, uint64_t frame_id
   frame_id_ = frame_id;
 }
 
+/* The timeline's (dxmt_otl.h): what an encoder is to the one that cannot be put beyond it. */
+static uint32_t
+otlStop(EncoderData *encoder) {
+  switch (encoder->type) {
+  case EncoderType::Render: return OTL_STOP_RENDER;
+  case EncoderType::Compute: return OTL_STOP_COMPUTE;
+  case EncoderType::Blit: return OTL_STOP_BLIT;
+  case EncoderType::Clear: return OTL_STOP_CLEAR;
+  case EncoderType::Resolve: return OTL_STOP_RESOLVE;
+  case EncoderType::SignalEvent:
+  case EncoderType::WaitForEvent: return OTL_STOP_EVENT;
+  case EncoderType::SampleTimestamp: return OTL_STOP_TIMESTAMP;
+  default: return OTL_STOP_OTHER;
+  }
+}
+/* The same first colour and depth, whatever else keeps the two passes apart. */
+static bool
+otlSameTargets(EncoderData *former, EncoderData *latter) {
+  if (former->type != EncoderType::Render || latter->type != EncoderType::Render)
+    return false;
+  auto r0 = static_cast<RenderEncoderData *>(former);
+  auto r1 = static_cast<RenderEncoderData *>(latter);
+  return r0->colors[0].attachment == r1->colors[0].attachment && r0->depth.attachment == r1->depth.attachment &&
+         (r0->colors[0].attachment || r0->depth.attachment);
+}
+
 constexpr unsigned kEncoderOptimizerThreshold = 64;
 
 QueryReadbacks
@@ -888,8 +915,12 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
       for (i = j + 1; i < encoder_count; i++) {
         if (encoders[i]->type == EncoderType::Null)
           continue;
-        if (checkEncoderRelation(encoders[j], encoders[i]) == DXMT_ENCODER_LIST_OP_SYNCHRONIZE)
+        const bool otl_same = otl_active() && otlSameTargets(encoders[j], encoders[i]);
+        if (checkEncoderRelation(encoders[j], encoders[i]) == DXMT_ENCODER_LIST_OP_SYNCHRONIZE) {
+          if (otl_active())
+            encoders[j]->otl_stop = otlStop(encoders[i]) | (otl_same ? OTL_STOP_SAME : 0);
           break;
+        }
       }
     }
   }
@@ -973,6 +1004,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
         render_pass_info.visibility_buffer = readbacks.visibility->visibility_result_heap;
       }
       auto gpu_buffer_ = data->allocated_argbuf;
+      if (otl_active())
+        dxmt_otl_stop(data->otl_stop);
       auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
       data->fence_wait.forEach(
           data->fence_wait_vertex, // if a fence is waited pre-raster, no need to wait again at fragment

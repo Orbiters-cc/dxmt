@@ -29,6 +29,13 @@ void dxmt_otl_pipeline_wait(uint32_t kind, uint64_t start) {
   otl_put(now, OTL_D_PIPELINE, kind, start, otl_thread.key & 0xffffffffffffull, 0, 0, 0, 0);
 }
 
+static _Thread_local uint32_t otl_stop_next;
+void dxmt_otl_stop(uint32_t stop) { otl_stop_next = stop; }
+/* The texture behind an attachment: a view's own, or the one it is of. */
+static uint64_t otl_texture_of(obj_handle_t handle) {
+  id<MTLTexture> t = (id<MTLTexture>)handle;
+  return (uint64_t)(uintptr_t)(t ? (t.parentTexture ? t.parentTexture : t) : nil);
+}
 static uint64_t otl_texture(obj_handle_t handle, uint32_t load, uint32_t store, obj_handle_t resolve) {
   id<MTLTexture> t = (id<MTLTexture>)handle;
   if (!t) return 0;
@@ -65,6 +72,9 @@ static void otl_pass(const struct WMTRenderPassInfo *info) {
   uint64_t now = otl_now();
   otl_put(now, OTL_D_PASS, a, otl_thread.key, (uint64_t)w << 32 | h, c[0], c[1], c[2], c[3]);
   if (d || s) otl_put(now, OTL_D_PASS_DS, a, otl_thread.key, d, s, info->render_target_array_length, 0, 0);
+  otl_put(now, OTL_D_PASS_ID, a, otl_thread.key, otl_texture_of(info->colors[0].texture), otl_texture_of(info->depth.texture),
+          otl_stop_next, 0, 0);
+  otl_stop_next = 0;
 }
 static void otl_encoder(uint16_t kind) {
   otl_begin(kind == OTL_D_BLIT ? 2 : 1);

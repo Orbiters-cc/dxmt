@@ -41,6 +41,8 @@ void dxmt_otl_initializer(uint64_t value);
 uint64_t dxmt_otl_take_pipeline_wait(void);
 /* This thread waited for a pipeline of `kind` from `start` until now. */
 void dxmt_otl_pipeline_wait(uint32_t kind, uint64_t start);
+/* The render pass this thread begins next was kept from joining a later one by this (enum otl_stop). */
+void dxmt_otl_stop(uint32_t stop);
 #ifdef __cplusplus
 }
 #endif
@@ -63,9 +65,22 @@ static inline void dxmt_otl_samples_done(struct otl_samples *, uint64_t, int) {}
 static inline void dxmt_otl_initializer(uint64_t) {}
 static inline uint64_t dxmt_otl_take_pipeline_wait(void) { return 0; }
 static inline void dxmt_otl_pipeline_wait(uint32_t, uint64_t) {}
+static inline void dxmt_otl_stop(uint32_t) {}
+static inline uint64_t otl_attachment(uint32_t, uint32_t, uint32_t, uint32_t, int, int, uint32_t, uint32_t) { return 0; }
 enum {
-  OTL_D_READY, OTL_D_ENCODE, OTL_D_DONE, OTL_D_SIGNAL, OTL_D_SEOC, OTL_D_INIT,
+  OTL_D_READY, OTL_D_ENCODE, OTL_D_DONE, OTL_D_SIGNAL, OTL_D_SEOC, OTL_D_INIT, OTL_D_COMMIT, OTL_D_PASS_ENDED,
   OTL_H_A, OTL_H_B, OTL_H_C, OTL_H_D,
+};
+enum otl_why {
+  OTL_WHY_OTHER, OTL_WHY_TARGETS, OTL_WHY_HAZARD, OTL_WHY_CLEAR_COLOUR, OTL_WHY_CLEAR_DEPTH, OTL_WHY_CLEAR_VIEW, OTL_WHY_CLEAR_UAV,
+  OTL_WHY_DRAW, OTL_WHY_DISPATCH, OTL_WHY_COPY, OTL_WHY_UPLOAD, OTL_WHY_READBACK, OTL_WHY_RESOLVE, OTL_WHY_END_EVENT,
+  OTL_WHY_END_TIMESTAMP, OTL_WHY_END_OCCLUSION, OTL_WHY_GETDATA, OTL_WHY_GETDATA_STALL, OTL_WHY_FLUSH, OTL_WHY_SIGNAL, OTL_WHY_WAIT,
+  OTL_WHY_MAP_STAGING, OTL_WHY_KEYED_MUTEX, OTL_WHY_COMMAND_LIST, OTL_WHY_IDLE, OTL_WHY_PRESENT, OTL_WHY_STATE,
+  OTL_WHY_STAGING_WRITE, OTL_WHY_UPSCALE,
+};
+enum otl_stop {
+  OTL_STOP_END = 0, OTL_STOP_RENDER, OTL_STOP_COMPUTE, OTL_STOP_BLIT, OTL_STOP_CLEAR, OTL_STOP_RESOLVE, OTL_STOP_EVENT,
+  OTL_STOP_TIMESTAMP, OTL_STOP_OTHER, OTL_STOP_SAME = 16,
 };
 
 #endif

@@ -128,6 +128,7 @@ struct EncoderData {
   FenceSet fence_wait;
   FenceSet fence_update;
   EncoderBarrierState barrier_state;
+  uint32_t otl_stop = 0; // the timeline's (dxmt_otl.h), while it is on: what it could not be put beyond
 };
 
 struct GSDispatchArgumentsMarshal {
