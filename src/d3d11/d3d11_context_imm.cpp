@@ -615,8 +615,9 @@ public:
     });
     if (otl_active())
       otl_put(otl_now(), OTL_D_SIGNAL, 0, cmd_queue.CurrentSeqId(), reinterpret_cast<uintptr_t>(pFence), Value,
-              fence->event.handle, reinterpret_cast<uintptr_t>(&cmd_queue), 0);
+              fence->event.handle, cmd_queue.otl_id_, cmd_queue.otl_group_);
     Flush();
+    cmd_queue.otl_group_++;
 
     return S_OK;
   }

@@ -133,6 +133,8 @@ public:
   uint64_t resource_initializer_event_id;
   uint64_t otl_executed_ = 0;  // the timeline's (dxmt_otl.h), while it is on
   uint64_t otl_committed_ = 0;
+  bool otl_recorded_ = false;                // its encoders are
+  struct otl_samples *otl_samples_ = nullptr; // its own from its encoding to its end
 
 private:
   CommandQueue *queue;
@@ -197,6 +199,7 @@ private:
   RingBumpState<HostBufferBlockAllocator, kCommandChunkCPUHeapSize, dxmt::null_mutex> cpu_command_allocator;
   RingBumpState<HostBufferBlockAllocator, 0x1000 /* 4kB */> reftracker_storage_allocator;
   CaptureState capture_state;
+  struct otl_pool *otl_pool_ = nullptr;
 
 public:
   InternalCommandLibrary cmd_library;
@@ -206,6 +209,8 @@ public:
   FrameStatisticsContainer statistics;
   ResourceInitializer initializer;
   CounterPool counter_pool;
+  uint64_t otl_id_ = 0;    // this queue in the timeline (dxmt_otl.h), 0 while it is off
+  uint64_t otl_group_ = 0; // what is recorded now is of this frame: each Signal ends one
 
   CommandQueue(WMT::Device device);
 

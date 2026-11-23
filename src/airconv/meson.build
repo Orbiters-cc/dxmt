@@ -68,7 +68,13 @@ airconv_shaders = [
   'shaders/air_tessellation.metal',
 ]
 
-airconv_shaders_ir = metalir_generator.process(
+# From standard input: the compiler writes the path of the file it is given into what it makes, and these are linked in.
+airconv_ir_generator = generator(find_program('sh'),
+  output : [ '@BASENAME@.air' ],
+  arguments : [ '-c', 'out=$1 in=$2; shift 2; exec xcrun -sdk macosx metal -o "$out" -x metal -c - "$@" < "$in"', 'sh', '@OUTPUT@',
+                '@INPUT@', '@EXTRA_ARGS@'],
+)
+airconv_shaders_ir = airconv_ir_generator.process(
   airconv_shaders,
   extra_args: ['-std=metal3.1', '--target=air64-apple-macos14.0'],
 )

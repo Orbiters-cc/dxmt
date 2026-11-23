@@ -15,91 +15,8 @@
 #include "../airconv_thunks.h"
 #ifdef DXMT_NATIVE
 #define OTL_IMPLEMENTATION
-#include "../../util/dxmt_otl.h"
+#include "otl_samples.h"
 
-/* GPU times of a chunk's encoders (OBELISK_TIMELINE_PASSES=1): one sample buffer per command buffer in flight, at most
- * OTL_SAMPLE_SLOTS of them and OTL_SAMPLE_PASSES encoders each; what does not fit has no times. */
-#define OTL_SAMPLE_SLOTS 16
-#define OTL_SAMPLE_PASSES 255
-struct otl_samples {
-  _Atomic(int) used;
-  uint64_t queue, chunk;
-  id<MTLCounterSampleBuffer> buffer;
-  uint32_t passes;
-  uint32_t index[OTL_SAMPLE_PASSES]; /* the encoder's index | type << 16 */
-};
-static struct otl_samples otl_sample_slots[OTL_SAMPLE_SLOTS];
-
-/* The timeline's: which chunk this thread encodes, how far it is, and what its open encoder holds. */
-static _Thread_local struct {
-  uint64_t queue, chunk, initializer, pipeline_wait;
-  uint32_t index, type;
-  uint64_t ops, pixels, commands;
-  struct otl_samples *samples;
-} otl_thread;
-
-void dxmt_otl_encoding(uint64_t queue, uint64_t chunk) {
-  otl_thread.queue = queue;
-  otl_thread.chunk = chunk;
-  otl_thread.index = 0;
-  otl_thread.samples = NULL;
-}
-static struct otl_samples *otl_samples_of(id<MTLCommandBuffer> cmdbuf) {
-  static int wanted = -1;
-  if (wanted < 0) wanted = getenv("OBELISK_TIMELINE_PASSES") && !strcmp(getenv("OBELISK_TIMELINE_PASSES"), "1");
-  if (!wanted || !otl_thread.chunk) return NULL;
-  if (otl_thread.samples) return otl_thread.samples;
-  id<MTLDevice> device = [cmdbuf device];
-  if (![device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) return NULL;
-  for (int i = 0; i < OTL_SAMPLE_SLOTS; i++) {
-    struct otl_samples *s = &otl_sample_slots[i];
-    int none = 0;
-    if (!atomic_compare_exchange_strong(&s->used, &none, 1)) continue;
-    if (!s->buffer) {
-      MTLCounterSampleBufferDescriptor *d = [[MTLCounterSampleBufferDescriptor alloc] init];
-      for (id<MTLCounterSet> set in device.counterSets)
-        if ([set.name isEqualToString:MTLCommonCounterSetTimestamp]) d.counterSet = set;
-      d.storageMode = MTLStorageModeShared;
-      d.sampleCount = OTL_SAMPLE_PASSES * 4;
-      s->buffer = d.counterSet ? [device newCounterSampleBufferWithDescriptor:d error:NULL] : nil;
-      [d release];
-      if (!s->buffer) {
-        atomic_store(&s->used, 0);
-        wanted = 0;
-        return NULL;
-      }
-    }
-    s->queue = otl_thread.queue;
-    s->chunk = otl_thread.chunk;
-    s->passes = 0;
-    return otl_thread.samples = s;
-  }
-  return NULL;
-}
-/* The first of four samples of the encoder about to begin, and its sample buffer; nil for none. */
-static id<MTLCounterSampleBuffer> otl_sample(id<MTLCommandBuffer> cmdbuf, uint32_t type, NSUInteger *first) {
-  struct otl_samples *s = otl_samples_of(cmdbuf);
-  if (!s || s->passes == OTL_SAMPLE_PASSES) return nil;
-  *first = s->passes * 4;
-  s->index[s->passes++] = (otl_thread.index & 0xffff) | type << 16;
-  return s->buffer;
-}
-void dxmt_otl_chunk_done(uint64_t queue, uint64_t chunk) {
-  for (int i = 0; i < OTL_SAMPLE_SLOTS; i++) {
-    struct otl_samples *s = &otl_sample_slots[i];
-    if (!atomic_load(&s->used) || s->queue != queue || s->chunk != chunk) continue;
-    @autoreleasepool {
-      NSData *data = [s->buffer resolveCounterRange:NSMakeRange(0, s->passes * 4)];
-      const MTLCounterResultTimestamp *t = data.bytes;
-      if (data.length >= s->passes * 4 * sizeof(*t))
-        for (uint32_t p = 0; p < s->passes; p++)
-          otl_put(otl_now(), OTL_D_PASS_TIME, s->index[p], chunk, t[p * 4].timestamp, t[p * 4 + 1].timestamp,
-                  t[p * 4 + 2].timestamp, t[p * 4 + 3].timestamp, queue);
-    }
-    atomic_store(&s->used, 0);
-    return;
-  }
-}
 void dxmt_otl_initializer(uint64_t value) { otl_thread.initializer = value; }
 uint64_t dxmt_otl_take_pipeline_wait(void) {
   uint64_t w = otl_thread.pipeline_wait;
@@ -109,7 +26,7 @@ uint64_t dxmt_otl_take_pipeline_wait(void) {
 void dxmt_otl_pipeline_wait(uint32_t kind, uint64_t start) {
   uint64_t now = otl_now();
   otl_thread.pipeline_wait += now - start;
-  otl_put(now, OTL_D_PIPELINE, kind, start, otl_thread.chunk, 0, 0, 0, 0);
+  otl_put(now, OTL_D_PIPELINE, kind, start, otl_thread.key & 0xffffffffffffull, 0, 0, 0, 0);
 }
 
 static uint64_t otl_texture(obj_handle_t handle, uint32_t load, uint32_t store, obj_handle_t resolve) {
@@ -125,7 +42,7 @@ static void otl_begin(uint32_t type) {
 }
 static void otl_end(void) {
   if (otl_thread.ops || otl_thread.commands)
-    otl_put(otl_now(), OTL_D_OPS, (otl_thread.index & 0xffff) | otl_thread.type << 16, otl_thread.chunk, otl_thread.ops,
+    otl_put(otl_now(), OTL_D_OPS, (otl_thread.index & 0xffff) | otl_thread.type << 16, otl_thread.key, otl_thread.ops,
             otl_thread.pixels, otl_thread.commands, 0, 0);
   otl_thread.ops = otl_thread.commands = 0;
 }
@@ -146,12 +63,12 @@ static void otl_pass(const struct WMTRenderPassInfo *info) {
   otl_begin(0);
   uint32_t a = (otl_thread.index & 0xffff) | colours << 16 | (uint32_t)(d != 0) << 24 | (uint32_t)(s != 0) << 25;
   uint64_t now = otl_now();
-  otl_put(now, OTL_D_PASS, a, otl_thread.chunk, (uint64_t)w << 32 | h, c[0], c[1], c[2], c[3]);
-  if (d || s) otl_put(now, OTL_D_PASS_DS, a, otl_thread.chunk, d, s, info->render_target_array_length, 0, 0);
+  otl_put(now, OTL_D_PASS, a, otl_thread.key, (uint64_t)w << 32 | h, c[0], c[1], c[2], c[3]);
+  if (d || s) otl_put(now, OTL_D_PASS_DS, a, otl_thread.key, d, s, info->render_target_array_length, 0, 0);
 }
 static void otl_encoder(uint16_t kind) {
   otl_begin(kind == OTL_D_BLIT ? 2 : 1);
-  otl_put(otl_now(), kind, otl_thread.index & 0xffff, otl_thread.chunk, 0, 0, 0, 0, 0);
+  otl_put(otl_now(), kind, otl_thread.index & 0xffff, otl_thread.key, 0, 0, 0, 0, 0);
 }
 static void otl_ops(uint32_t type, const struct wmtcmd_base *next) {
   uint64_t ops = 0, pixels = 0, commands = 0;
@@ -291,7 +208,7 @@ _MTLCommandBuffer_commit(void *obj) {
     otl_thread.initializer = 0;
     otl_put(otl_now(), OTL_D_INIT, 0, value, 0, 0, 0, 0, 0);
     [(id<MTLCommandBuffer>)params->handle addCompletedHandler:^(id<MTLCommandBuffer> c) {
-      otl_put(otl_now(), OTL_D_INIT_DONE, 0, value, (uint64_t)(c.GPUStartTime * 1e9), (uint64_t)(c.GPUEndTime * 1e9), 0, 0, 0);
+      otl_put(otl_now(), OTL_D_INIT_DONE, (uint32_t)c.status, value, (uint64_t)(c.GPUStartTime * 1e9), (uint64_t)(c.GPUEndTime * 1e9), 0, 0, 0);
     }];
   }
 #endif
@@ -610,10 +527,10 @@ static NTSTATUS
 _MTLCommandBuffer_blitCommandEncoder(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
 #ifdef DXMT_NATIVE
-  if (otl_active()) {
+  if (otl_active() && otl_thread.key) {
     NSUInteger first = 0;
     otl_encoder(OTL_D_BLIT);
-    id<MTLCounterSampleBuffer> samples = otl_sample((id<MTLCommandBuffer>)params->handle, 2, &first);
+    id<MTLCounterSampleBuffer> samples = otl_sample(2, &first);
     if (samples) {
       MTLBlitPassDescriptor *pass = [[MTLBlitPassDescriptor alloc] init];
       pass.sampleBufferAttachments[0].sampleBuffer = samples;
@@ -633,10 +550,10 @@ static NTSTATUS
 _MTLCommandBuffer_computeCommandEncoder(void *obj) {
   struct unixcall_generic_obj_uint64_obj_ret *params = obj;
 #ifdef DXMT_NATIVE
-  if (otl_active()) {
+  if (otl_active() && otl_thread.key) {
     NSUInteger first = 0;
     otl_encoder(OTL_D_COMPUTE);
-    id<MTLCounterSampleBuffer> samples = otl_sample((id<MTLCommandBuffer>)params->handle, 1, &first);
+    id<MTLCounterSampleBuffer> samples = otl_sample(1, &first);
     if (samples) {
       MTLComputePassDescriptor *pass = [[MTLComputePassDescriptor alloc] init];
       pass.dispatchType = params->arg ? MTLDispatchTypeConcurrent : MTLDispatchTypeSerial;
@@ -708,10 +625,10 @@ _MTLCommandBuffer_renderCommandEncoder(void *obj) {
   }
 
 #ifdef DXMT_NATIVE
-  if (otl_active()) {
+  if (otl_active() && otl_thread.key) {
     NSUInteger first = 0;
     otl_pass(info);
-    id<MTLCounterSampleBuffer> samples = otl_sample((id<MTLCommandBuffer>)params->handle, 0, &first);
+    id<MTLCounterSampleBuffer> samples = otl_sample(0, &first);
     if (samples) {
       MTLRenderPassSampleBufferAttachmentDescriptor *at = descriptor.sampleBufferAttachments[0];
       at.sampleBuffer = samples;
@@ -732,7 +649,7 @@ static NTSTATUS
 _MTLCommandEncoder_endEncoding(void *obj) {
   struct unixcall_generic_obj_noret *params = obj;
 #ifdef DXMT_NATIVE
-  if (otl_active()) otl_end();
+  if (otl_active() && otl_thread.key) otl_end();
 #endif
   [(id<MTLCommandEncoder>)params->handle endEncoding];
   return STATUS_SUCCESS;
@@ -924,7 +841,7 @@ _MTLBlitCommandEncoder_encodeCommands(void *obj) {
   const struct wmtcmd_base *next = params->cmd_head.ptr;
   id<MTLBlitCommandEncoder> encoder = (id<MTLBlitCommandEncoder>)params->encoder;
 #ifdef DXMT_NATIVE
-  if (otl_active()) otl_ops(2, next);
+  if (otl_active() && otl_thread.key) otl_ops(2, next);
 #endif
   while (next) {
     switch ((enum WMTBlitCommandType)next->type) {
@@ -1062,7 +979,7 @@ _MTLComputeCommandEncoder_encodeCommands(void *obj) {
   id<MTLComputeCommandEncoder> encoder = (id<MTLComputeCommandEncoder>)params->encoder;
   MTLSize threadgroup_size = {0, 0, 0};
 #ifdef DXMT_NATIVE
-  if (otl_active()) otl_ops(1, next);
+  if (otl_active() && otl_thread.key) otl_ops(1, next);
 #endif
   while (next) {
     switch ((enum WMTComputeCommandType)next->type) {
@@ -1155,7 +1072,7 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
   const struct wmtcmd_base *next = params->cmd_head.ptr;
   id<MTLRenderCommandEncoder> encoder = (id<MTLRenderCommandEncoder>)params->encoder;
 #ifdef DXMT_NATIVE
-  if (otl_active()) otl_ops(0, next);
+  if (otl_active() && otl_thread.key) otl_ops(0, next);
 #endif
   while (next) {
     switch ((enum WMTRenderCommandType)next->type) {
@@ -2888,11 +2805,12 @@ _MTLSharedEvent_setWin32EventAtValue(void *obj) {
   struct dxmt_evt_core *core = dxmt_evt_core_retain((void *)params->event_handle);
   if (!core)
     return STATUS_SUCCESS;
+  const uint64_t otl_handle = (uint64_t)params->event_handle;
   [(id<MTLSharedEvent>)params->shared_event
       notifyListener:(MTLSharedEventListener *)params->shared_event_listener
              atValue:params->value
                block:^(id<MTLSharedEvent> _e, uint64_t _v) {
-                 if (otl_active()) otl_put(otl_now(), OTL_D_NOTIFY, 0, (uint64_t)(uintptr_t)_e, _v, 0, 0, 0, 0);
+                 if (otl_active()) otl_put(otl_now(), OTL_D_NOTIFY, 0, (uint64_t)(uintptr_t)_e, _v, otl_handle, 0, 0, 0);
                  dxmt_evt_core_signal_release(core);
                }];
   return STATUS_SUCCESS;
