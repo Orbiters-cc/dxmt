@@ -362,9 +362,12 @@ public:
     switch (desc.Query) {
     case D3D11_QUERY_TIMESTAMP_DISJOINT:
     case D3D11_QUERY_EVENT: {
-      if (ctx_state.has_dirty_op_since_last_event) {
+      const bool dirty = ctx_state.has_dirty_op_since_last_event;
+      if (otl_active())
+        otlQueryEnded(desc.Query == D3D11_QUERY_EVENT ? 0 : 1, !dirty);
+      if (dirty) {
         auto event_id = cmd_queue.GetNextEventSeqId();
-        static_cast<MTLD3D11EventQuery *>(pAsync)->Issue(event_id);
+        IssueEvent(static_cast<MTLD3D11EventQuery *>(pAsync), event_id);
         InvalidateCurrentPass(true, OTL_WHY_END_EVENT);
         EmitOP([event_id](ArgumentEncodingContext &enc) mutable {
           enc.signalEvent(event_id);
@@ -372,7 +375,7 @@ public:
         PromoteFlush(OTL_WHY_END_EVENT);
         ctx_state.has_dirty_op_since_last_event = false;
       } else {
-        static_cast<MTLD3D11EventQuery *>(pAsync)->Issue(cmd_queue.GetCurrentEventSeqId());
+        IssueEvent(static_cast<MTLD3D11EventQuery *>(pAsync), cmd_queue.GetCurrentEventSeqId());
       }
       break;
     }
@@ -381,6 +384,8 @@ public:
       // committed. No flush here: Unreal Engine ends hundreds of timestamps per frame (GPU stats), and a command buffer
       // for each kept the queue's 32 chunks full (THE FINALS: about 150 command buffers per frame). A GetData without
       // D3D11_ASYNC_GETDATA_DONOTFLUSH still flushes while the result is not there.
+      if (otl_active())
+        otlQueryEnded(2, false);
       if (auto query = static_cast<MTLD3D11TimestampQuery *>(pAsync)->End()) {
         InvalidateCurrentPass(true, OTL_WHY_END_TIMESTAMP);
         EmitOP([query = Rc(query)](ArgumentEncodingContext &enc) mutable {
@@ -391,6 +396,8 @@ public:
     }
     case D3D11_QUERY_OCCLUSION:
     case D3D11_QUERY_OCCLUSION_PREDICATE: {
+      if (otl_active())
+        otlQueryEnded(3, false);
       if (auto query = static_cast<MTLD3D11OcclusionQuery *>(pAsync)->End())
         EmitST([query = Rc(query)](ArgumentEncodingContext &enc) mutable {
           enc.endVisibilityResultQuery(std::move(query));
@@ -408,6 +415,89 @@ public:
     }
   }
 
+  /* What GetData and its other callers see of an event query changes here and in LookAtEvent alone: with the switch under
+   * event_look_, which nothing ever waits under (a look may be under its caller's own lock, and may not wait for the device's). */
+  void
+  IssueEvent(MTLD3D11EventQuery *query, uint64_t event_id) {
+    if (query_rescue_once_) {
+      std::lock_guard<dxmt::mutex> look(event_look_);
+      query->Issue(event_id);
+    } else {
+      query->Issue(event_id);
+    }
+  }
+
+  /* CheckEventState with the switch. `rescue`: a stalled look found the query's marker in a chunk not handed to the encoder. */
+  EventState
+  LookAtEvent(MTLD3D11EventQuery *query, bool &rescue) {
+    const uint64_t signaled = cmd_queue.SignaledEventSeqId();
+    std::lock_guard<dxmt::mutex> look(event_look_);
+    const auto state = query->CheckEventState(signaled);
+    rescue = state == EventState::Stall && query->StalledEventSeqId() > cmd_queue.SubmittedEventSeqId();
+    return state;
+  }
+
+  /* Hands the chunk with the marker of `query` to the encoder, once: under the device's lock, as every End and every commit is,
+   * it is found again whether the marker, of the query's last End, is in a chunk that was not. A lock that is not free, or a commit
+   * that would have to wait for the GPU, leaves it to the next look. */
+  void
+  RescueEvent(MTLD3D11EventQuery *query) {
+    std::unique_lock<d3d11_device_mutex> lock(mutex, std::try_to_lock);
+    if (!lock.owns_lock() || cmd_queue.CommitWaits()) {
+      if (otl_active())
+        otl_queries_.busy.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    uint64_t event_id;
+    {
+      std::lock_guard<dxmt::mutex> look(event_look_);
+      event_id = query->StalledEventSeqId();
+    }
+    if (event_id <= cmd_queue.SubmittedEventSeqId())
+      return;
+    cmd_queue.CurrentFrameStatistics().event_stall++;
+    FlushStalled(event_id);
+  }
+
+  /* What a stalled look does to a query without the switch, whatever its marker; with it, RescueEvent's. */
+  void
+  FlushStalled(uint64_t event_id) {
+    if (!otl_active())
+      return FlushFor(OTL_WHY_GETDATA_STALL);
+    const uint64_t at = otl_now(), chunk = cmd_queue.CurrentSeqId(), before = cmd_queue.SubmittedEventSeqId();
+    FlushFor(OTL_WHY_GETDATA_STALL);
+    const uint64_t after = cmd_queue.SubmittedEventSeqId();
+    if (after == before && event_id <= before)
+      return; // nothing had been recorded, and nothing was owed
+    otl_put(at, OTL_D_STALL, (event_id <= before) | (after > before) << 1 | (event_id > after) << 2 | query_rescue_once_ << 3,
+            cmd_queue.otl_id_, chunk, event_id, before, after, cmd_queue.otl_group_);
+  }
+
+  /* The timeline's, while it is on: the queries ended and looked at since the last Signal (OTL_D_QUERIES). */
+  struct {
+    std::atomic<uint16_t> ended[4] = {};
+    std::atomic<uint32_t> clean = 0, pending = 0, stalled = 0, covered = 0, busy = 0, there = 0;
+  } otl_queries_;
+
+  void
+  otlQueryEnded(unsigned kind, bool clean) {
+    otl_queries_.ended[kind].fetch_add(1, std::memory_order_relaxed);
+    if (clean)
+      otl_queries_.clean.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  void
+  otlQueriesTold() {
+    auto taken = [](auto &count) { return uint64_t(count.exchange(0, std::memory_order_relaxed)); };
+    uint64_t ended = 0;
+    for (unsigned kind = 0; kind < 4; kind++)
+      ended |= taken(otl_queries_.ended[kind]) << 16 * kind;
+    const uint64_t clean = taken(otl_queries_.clean), busy = taken(otl_queries_.busy), pending = taken(otl_queries_.pending),
+                   stalled = taken(otl_queries_.stalled), covered = taken(otl_queries_.covered), there = taken(otl_queries_.there);
+    otl_put(otl_now(), OTL_D_QUERIES, query_rescue_once_ | mutex.get_protected() << 1, cmd_queue.otl_id_, cmd_queue.otl_group_, ended,
+            clean | busy << 32, pending | stalled << 32, covered | there << 32);
+  }
+
   HRESULT
   STDMETHODCALLTYPE
   GetData(ID3D11Asynchronous *pAsync, void *pData, UINT DataSize, UINT GetDataFlags) override {
@@ -420,21 +510,40 @@ public:
 
     HRESULT hr = S_FALSE;
     uint32_t otl_why = OTL_WHY_GETDATA;
+    uint64_t stalled_event_id = 0;
 
     D3D11_QUERY_DESC desc;
     ((ID3D11Query *)pAsync)->GetDesc(&desc);
     switch (desc.Query) {
     case D3D11_QUERY_EVENT:
     case D3D11_QUERY_TIMESTAMP_DISJOINT: {
-      switch (static_cast<MTLD3D11EventQuery *>(pAsync)->CheckEventState(cmd_queue.SignaledEventSeqId())) {
+      auto query = static_cast<MTLD3D11EventQuery *>(pAsync);
+      bool rescue = false;
+      switch (query_rescue_once_ ? LookAtEvent(query, rescue) : query->CheckEventState(cmd_queue.SignaledEventSeqId())) {
       case EventState::Pending:
+        if (otl_active())
+          otl_queries_.pending.fetch_add(1, std::memory_order_relaxed);
         break;
       case EventState::Stall:
-        if (GetDataFlags & D3D11_ASYNC_GETDATA_DONOTFLUSH)
+        if (otl_active())
+          otl_queries_.stalled.fetch_add(1, std::memory_order_relaxed);
+        if (GetDataFlags & D3D11_ASYNC_GETDATA_DONOTFLUSH) {
+          if (query_rescue_once_) {
+            if (rescue)
+              RescueEvent(query);
+            else if (otl_active())
+              otl_queries_.covered.fetch_add(1, std::memory_order_relaxed);
+            break;
+          }
           otl_why = OTL_WHY_GETDATA_STALL;
+          if (otl_active())
+            stalled_event_id = query->StalledEventSeqId();
+        }
         GetDataFlags &= ~D3D11_ASYNC_GETDATA_DONOTFLUSH;
         break;
       case EventState::Signaled:
+        if (otl_active())
+          otl_queries_.there.fetch_add(1, std::memory_order_relaxed);
         hr = S_OK;
         break;
       case EventState::Invalid:
@@ -486,8 +595,12 @@ public:
       return E_FAIL;
     }
     if (hr == S_FALSE && (GetDataFlags & D3D11_ASYNC_GETDATA_DONOTFLUSH) == 0) {
+      auto lock = LockForRescue(mutex);
       cmd_queue.CurrentFrameStatistics().event_stall++;
-      FlushFor(otl_why);
+      if (otl_why == OTL_WHY_GETDATA_STALL)
+        FlushStalled(stalled_event_id);
+      else
+        FlushFor(otl_why);
     }
     return hr;
   }
@@ -611,9 +724,12 @@ public:
 
   virtual void
   WaitUntilGPUIdle() override {
+    auto lock = LockForRescue(mutex);
     uint64_t seq = cmd_queue.CurrentSeqId();
     if(!InvalidateCurrentPass(false, OTL_WHY_IDLE))
       Commit();
+    if (lock.owns_lock())
+      lock.unlock();
     cmd_queue.WaitCPUFence(seq);
   };
 
@@ -645,6 +761,8 @@ public:
       otl_put(otl_now(), OTL_D_SIGNAL, 0, cmd_queue.CurrentSeqId(), reinterpret_cast<uintptr_t>(pFence), Value,
               fence->event.handle, cmd_queue.otl_id_, cmd_queue.otl_group_);
     FlushFor(OTL_WHY_SIGNAL);
+    if (otl_active())
+      otlQueriesTold();
     cmd_queue.otl_group_++;
 
     return S_OK;
@@ -710,6 +828,8 @@ private:
   std::atomic<uint32_t> refcount = 0;
   D3D11Multithread d3dmt_;
   bool ignore_map_flag_no_wait_;
+  const bool query_rescue_once_ = QueryRescueOnce();
+  dxmt::mutex event_look_;
 };
 
 std::unique_ptr<MTLD3D11DeviceContextBase>

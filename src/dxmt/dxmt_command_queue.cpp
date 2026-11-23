@@ -100,7 +100,8 @@ CommandQueue::CommitCurrentChunk() {
   auto chunk_id = ready_for_encode.load(std::memory_order_relaxed);
   auto &chunk = chunks[chunk_id % kCommandChunkCount];
   chunk.chunk_id = chunk_id;
-  chunk.chunk_event_id = GetNextEventSeqId();
+  const uint64_t event_id = GetNextEventSeqId();
+  chunk.chunk_event_id = event_id;
   chunk.frame_ = frame_count;
   chunk.resource_initializer_event_id = initializer.flushToWait();
   auto& statistics = CurrentFrameStatistics();
@@ -113,6 +114,7 @@ CommandQueue::CommitCurrentChunk() {
 #if ASYNC_ENCODING
   ready_for_encode.fetch_add(1, std::memory_order_release);
   ready_for_encode.notify_one();
+  submitted_event_seq_id.store(event_id, std::memory_order_release); // (the chunk is the encoder's: no more of it here)
 
   auto t0 = clock::now();
   chunk_ongoing.wait(kCommandChunkCount - 1, std::memory_order_acquire);
@@ -122,6 +124,7 @@ CommandQueue::CommitCurrentChunk() {
 
 #else
   CommitChunkInternal(chunk, ready_for_encode.fetch_add(1, std::memory_order_relaxed));
+  submitted_event_seq_id.store(event_id, std::memory_order_release);
 #endif
 
   cpu_command_allocator.free_blocks(cpu_coherent.signaledValue());
