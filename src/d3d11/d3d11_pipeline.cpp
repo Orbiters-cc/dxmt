@@ -4,6 +4,7 @@
 #include "d3d11_device.hpp"
 #include "d3d11_shader.hpp"
 #include "log/log.hpp"
+#include "dxmt_otl.h"
 #include <atomic>
 
 namespace dxmt {
@@ -56,7 +57,7 @@ public:
   }
 
   void GetPipeline(MTL_COMPILED_GRAPHICS_PIPELINE *pPipeline) final {
-    ready_.wait(false, std::memory_order_acquire);
+    dxmt_otl_wait_pipeline(0, ready_);
     *pPipeline = {state_};
   }
 
@@ -190,7 +191,7 @@ public:
   }
 
   void GetPipeline(MTL_COMPILED_COMPUTE_PIPELINE *pPipeline) final {
-    ready_.wait(false, std::memory_order_acquire);
+    dxmt_otl_wait_pipeline(3, ready_);
     *pPipeline = {state_};
   }
 

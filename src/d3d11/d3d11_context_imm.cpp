@@ -6,6 +6,7 @@
 #include "d3d11_context_impl.cpp"
 #include "dxmt_context.hpp"
 #include "dxmt_staging.hpp"
+#include "dxmt_otl.h"
 
 namespace dxmt {
 struct ContextInternalState {
@@ -612,6 +613,9 @@ public:
     EmitOP([event = fence->event, Value](ArgumentEncodingContext &enc) mutable {
       enc.signalEvent(std::move(event), Value);
     });
+    if (otl_active())
+      otl_put(otl_now(), OTL_D_SIGNAL, 0, cmd_queue.CurrentSeqId(), reinterpret_cast<uintptr_t>(pFence), Value,
+              fence->event.handle, reinterpret_cast<uintptr_t>(&cmd_queue), 0);
     Flush();
 
     return S_OK;

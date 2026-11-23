@@ -24,6 +24,7 @@
 #include "d3d11_shader.hpp"
 #include "log/log.hpp"
 #include "thread.hpp"
+#include "dxmt_otl.h"
 
 namespace dxmt {
 
@@ -102,7 +103,7 @@ public:
   }
 
   void GetPipeline(MTL_COMPILED_TESSELLATION_MESH_PIPELINE *pPipeline) final {
-    ready_.wait(false, std::memory_order_acquire);
+    dxmt_otl_wait_pipeline(2, ready_);
     *pPipeline = {state_rasterization_, hull_reflection.NumOutputElement,
                   hull_reflection.ThreadsPerPatch};
   }

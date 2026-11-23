@@ -27,6 +27,7 @@
 #include "dxmt_context.hpp"
 #include "dxmt_counter.hpp"
 #include "dxmt_occlusion_query.hpp"
+#include "dxmt_otl.h"
 #include "dxmt_resource_initializer.hpp"
 #include "dxmt_ring_bump_allocator.hpp"
 #include "dxmt_statistics.hpp"
@@ -116,6 +117,8 @@ public:
     list_enc.execute(enc);
     attached_cmdbuf = cmdbuf;
     auto t1 = clock::now();
+    if (otl_active())
+      otl_executed_ = otl_now();
     readback = enc.flushCommands(cmdbuf, chunk_id, chunk_event_id);
     auto t2 = clock::now();
     statistics.encode_prepare_interval += (t1 - t0);
@@ -128,6 +131,8 @@ public:
   uint64_t signal_frame_latency_fence_;
   QueryReadbacks readback;
   uint64_t resource_initializer_event_id;
+  uint64_t otl_executed_ = 0;  // the timeline's (dxmt_otl.h), while it is on
+  uint64_t otl_committed_ = 0;
 
 private:
   CommandQueue *queue;

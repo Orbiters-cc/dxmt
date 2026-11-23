@@ -20,6 +20,7 @@
 #include "dxmt_resource_initializer.hpp"
 #include "dxmt_format.hpp"
 #include "util_math.hpp"
+#include "dxmt_otl.h"
 #include <cstdint>
 #include <mutex>
 
@@ -389,6 +390,8 @@ ResourceInitializer::flushInternal() {
   auto cmdbuf = upload_queue_.commandBuffer();
   encode(cmdbuf);
   cmdbuf.encodeSignalEvent(upload_queue_event_, seq_id);
+  if (otl_active())
+    dxmt_otl_initializer(seq_id);
   cmdbuf.commit();
   reset();
   cached_coherent_seq_id = upload_queue_event_.signaledValue();

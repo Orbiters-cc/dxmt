@@ -2,6 +2,7 @@
 #include "d3d11_device_child.hpp"
 #include "d3d11_resource.hpp"
 #include "util_win32_compat.h"
+#include "dxmt_otl.h"
 
 namespace dxmt {
 
@@ -85,6 +86,9 @@ public:
   HRESULT STDMETHODCALLTYPE SetEventOnCompletion(UINT64 Value,
                                                  HANDLE Event) final {
     auto shared_event_listener = this->m_parent->GetDXMTDevice().queue().GetSharedEventListener();
+    if (otl_active())
+      otl_put(otl_now(), OTL_D_SEOC, 0, reinterpret_cast<uintptr_t>(static_cast<ID3D11Fence *>(this)), Value,
+              reinterpret_cast<uintptr_t>(Event), event.handle, 0, 0);
     MTLSharedEvent_setWin32EventAtValue(event.handle, shared_event_listener, Event, Value);
     return S_OK;
   };

@@ -61,6 +61,7 @@ CommandQueue::CommandQueue(WMT::Device device) :
     chunk.reset();
   };
   event = device.newSharedEvent();
+  otl_init("dxmt");
 
   std::string env = env::getEnvVar("DXMT_CAPTURE_FRAME");
 
@@ -100,6 +101,9 @@ CommandQueue::CommitCurrentChunk() {
   chunk.resource_initializer_event_id = initializer.flushToWait();
   auto& statistics = CurrentFrameStatistics();
   statistics.command_buffer_count++;
+  if (otl_active())
+    otl_put(otl_now(), OTL_D_READY, 0, reinterpret_cast<uintptr_t>(this), chunk_id, chunk.resource_initializer_event_id, 0,
+            0, 0);
 #if ASYNC_ENCODING
   ready_for_encode.fetch_add(1, std::memory_order_release);
   ready_for_encode.notify_one();
@@ -121,6 +125,12 @@ void
 CommandQueue::CommitChunkInternal(CommandChunk &chunk, uint64_t seq) {
 
   auto pool = WMT::MakeAutoreleasePool();
+  const bool otl = otl_active();
+  const uint64_t otl_woken = otl ? otl_now() : 0;
+  if (otl) {
+    dxmt_otl_take_pipeline_wait();
+    dxmt_otl_encoding(reinterpret_cast<uintptr_t>(this), chunk.chunk_id);
+  }
 
   switch (capture_state.getNextAction(chunk.frame_)) {
   case CaptureState::NextAction::StartCapture: {
@@ -158,7 +168,19 @@ CommandQueue::CommitChunkInternal(CommandChunk &chunk, uint64_t seq) {
     cmdbuf.encodeWaitForEvent(initializer.event(), chunk.resource_initializer_event_id);
   }
   chunk.encode(chunk.attached_cmdbuf, this->argument_encoding_ctx);
+  const uint64_t otl_flushed = otl ? otl_now() : 0;
+  if (otl) {
+    dxmt_otl_encoding(0, 0);
+    chunk.otl_committed_ = otl_flushed; // the GPU may start before commit() returns
+  }
   cmdbuf.commit();
+  if (otl) {
+    const uint64_t waited = dxmt_otl_take_pipeline_wait();
+    otl_put(otl_now(), OTL_D_ENCODE, 0, chunk.chunk_id, otl_woken, chunk.otl_executed_, otl_flushed, waited,
+            reinterpret_cast<uintptr_t>(this));
+    otl_hist(OTL_H_A, otl_flushed - otl_woken);
+    otl_hist(OTL_H_D, waited);
+  }
 
   ready_for_commit.fetch_add(1, std::memory_order_release);
   ready_for_commit.notify_one();
@@ -196,6 +218,19 @@ CommandQueue::WaitForFinishThread() {
     auto &chunk = chunks[internal_seq % kCommandChunkCount];
     if (chunk.attached_cmdbuf.status() <= WMTCommandBufferStatusScheduled) {
       chunk.attached_cmdbuf.waitUntilCompleted();
+    }
+    if (otl_active() && chunk.otl_committed_) {
+      auto cmdbuf = chunk.attached_cmdbuf.handle;
+      const uint64_t start = MTLCommandBuffer_property(cmdbuf, WMTCommandBufferPropertyGPUStartTime);
+      const uint64_t end = MTLCommandBuffer_property(cmdbuf, WMTCommandBufferPropertyGPUEndTime);
+      otl_put(otl_now(), OTL_D_DONE, uint32_t(chunk.attached_cmdbuf.status()), chunk.chunk_id, start, end,
+              MTLCommandBuffer_property(cmdbuf, WMTCommandBufferPropertyKernelStartTime),
+              MTLCommandBuffer_property(cmdbuf, WMTCommandBufferPropertyKernelEndTime), reinterpret_cast<uintptr_t>(this));
+      dxmt_otl_chunk_done(reinterpret_cast<uintptr_t>(this), chunk.chunk_id);
+      if (end > start)
+        otl_hist(OTL_H_C, end - start);
+      if (start > chunk.otl_committed_)
+        otl_hist(OTL_H_B, start - chunk.otl_committed_);
     }
     if (chunk.attached_cmdbuf.status() == WMTCommandBufferStatusError) {
       ERR("Device error at frame ", chunk.frame_, ": ", chunk.attached_cmdbuf.error().description().getUTF8String());
