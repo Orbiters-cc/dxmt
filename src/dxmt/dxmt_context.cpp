@@ -708,14 +708,9 @@ ArgumentEncodingContext::endPass() {
 
   if (encoder_current->id != ~0ull) {
     if (encoder_current->type == EncoderType::Render) {
-      if (vro_state_.counting() && InitOrder()) {
-        auto &cmd = encodeRenderCommand<wmtcmd_render_setvisibilitymode>();
-        cmd.type = WMTRenderCommandSetVisibilityMode;
-        cmd.mode = WMTVisibilityResultModeDisabled;
-        cmd.offset = 0;
-      }
-      vro_state_.endEncoder();
       auto render_encoder = static_cast<RenderEncoderData *>(encoder_current);
+      render_encoder->counting_at_end = vro_state_.counting();
+      vro_state_.endEncoder();
 
       if (render_encoder->depth.attachment && !(render_encoder->dsv_readonly_flags & 1))
         access<PipelineStage::Pixel>(
@@ -1447,6 +1442,16 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
       r1->stencil.clear_stencil = r0->stencil.clear_stencil;
       r1->stencil.store_action = r0->stencil.store_action;
 
+      if (r0->counting_at_end && InitOrder()) {
+        // r1 begins with the counting off, and does not say so (dxmt_init_order.hpp)
+        auto off = (wmtcmd_render_setvisibilitymode *)allocate_cpu_heap(sizeof(wmtcmd_render_setvisibilitymode), 16);
+        off->type = WMTRenderCommandSetVisibilityMode;
+        off->next.set(nullptr);
+        off->mode = WMTVisibilityResultModeDisabled;
+        off->offset = 0;
+        r0->cmd_tail->next.set(off);
+        r0->cmd_tail = (wmtcmd_base *)off;
+      }
       if ((void *)r0->cmd_tail != &r0->cmd_head) {
         r0->cmd_tail->next.set(r1->cmd_head.next.get());
         r1->cmd_head.next.set(r0->cmd_head.next.get());

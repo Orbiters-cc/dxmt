@@ -12,9 +12,10 @@ follows) is not taken for one the GPU only reads: what it is written by is put i
 the update and the draws that read it are independent of each other to the optimiser and to the GPU, and a draw may see what was there before
 (zeros, or what the memory was).
 
-A render pass whose last draws were counted by an occlusion query ends with the counting off. Two passes of the same targets are put together by putting
-their commands together, and a pass begins with the counting off without saying so: without it, the first one's last query counts the
-second one's draws, until one of them begins to be counted itself.
+Two passes of the same targets are put together with the counting of the first one's last draws, by an occlusion query, turned off between them. They are put
+together by putting their commands together, and a pass begins with the counting off without saying so: without it, the first one's last query
+counts the second one's draws, until one of them begins to be counted itself. (Turned off there alone, not where every counted pass ends: that
+made counts that miss a part, which this Metal has now and then of a query over two encoders, some three times as frequent.)
 */
 inline bool
 InitOrder() {
