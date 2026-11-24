@@ -17,6 +17,7 @@
  */
 
 #include "dxmt_context.hpp"
+#include "dxmt_init_order.hpp"
 #include "dxmt_otl.h"
 #include "Metal.hpp"
 #include "dxmt_command_queue.hpp"
@@ -707,6 +708,12 @@ ArgumentEncodingContext::endPass() {
 
   if (encoder_current->id != ~0ull) {
     if (encoder_current->type == EncoderType::Render) {
+      if (vro_state_.counting() && InitOrder()) {
+        auto &cmd = encodeRenderCommand<wmtcmd_render_setvisibilitymode>();
+        cmd.type = WMTRenderCommandSetVisibilityMode;
+        cmd.mode = WMTVisibilityResultModeDisabled;
+        cmd.offset = 0;
+      }
       vro_state_.endEncoder();
       auto render_encoder = static_cast<RenderEncoderData *>(encoder_current);
 

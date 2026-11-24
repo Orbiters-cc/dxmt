@@ -19,6 +19,7 @@
 #include "com/com_pointer.hpp"
 #include "d3d11_device.hpp"
 #include "dxmt_buffer.hpp"
+#include "dxmt_init_order.hpp"
 #include "dxmt_dynamic.hpp"
 #include "dxmt_format.hpp"
 #include "d3d11_resource.hpp"
@@ -87,7 +88,7 @@ public:
     if (!m_parent->IsTraced() && pDesc->Usage == D3D11_USAGE_DYNAMIC)
       flags.set(BufferAllocationFlag::CpuWriteCombined);
     // if (pDesc->Usage != D3D11_USAGE_DEFAULT)
-    if (pDesc->Usage == D3D11_USAGE_IMMUTABLE)
+    if (pDesc->Usage == D3D11_USAGE_IMMUTABLE && (pInitialData || !InitOrder()))
       flags.set(BufferAllocationFlag::GpuReadonly);
     if (pDesc->Usage != D3D11_USAGE_DYNAMIC) {
       if (pInitialData)

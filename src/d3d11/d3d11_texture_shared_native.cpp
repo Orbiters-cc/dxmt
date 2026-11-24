@@ -3,6 +3,7 @@
 #include "d3d11_texture_shared_native.hpp"
 #include "d3d11_resource.hpp"
 #include "dxmt_format.hpp"
+#include "dxmt_init_order.hpp"
 
 #include <cstdint>
 #include <errno.h>
@@ -154,7 +155,7 @@ AllocateShmLinearTexture2D(
 
   Flags<TextureAllocationFlag> flags;
   flags.set(TextureAllocationFlag::Shared);
-  if (finalDesc.Usage == D3D11_USAGE_IMMUTABLE)
+  if (finalDesc.Usage == D3D11_USAGE_IMMUTABLE && !InitOrder()) // (its data, if any, are a later update's too)
     flags.set(TextureAllocationFlag::GpuReadonly);
   if (!(finalDesc.BindFlags & (D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)))
     flags.set(TextureAllocationFlag::ShaderReadonly);

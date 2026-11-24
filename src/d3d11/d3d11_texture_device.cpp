@@ -19,6 +19,7 @@
 
 #include "com/com_pointer.hpp"
 #include "d3d11_device.hpp"
+#include "dxmt_init_order.hpp"
 #include "d3d11_enumerable.hpp"
 #include "d3d11_view.hpp"
 #include "dxmt_dynamic.hpp"
@@ -472,7 +473,7 @@ HRESULT CreateDeviceTextureInternal(MTLD3D11Device *pDevice,
 
     Flags<TextureAllocationFlag> flags;
     flags.set(TextureAllocationFlag::GpuPrivate);
-    if (finalDesc.Usage == D3D11_USAGE_IMMUTABLE)
+    if (finalDesc.Usage == D3D11_USAGE_IMMUTABLE && (pInitialData || !InitOrder()))
       flags.set(TextureAllocationFlag::GpuReadonly);
     if (!(finalDesc.BindFlags & (D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)))
       flags.set(TextureAllocationFlag::ShaderReadonly);
@@ -534,7 +535,7 @@ HRESULT CreateDeviceTextureInternal(MTLD3D11Device *pDevice,
   flags.set(finalDesc.CPUAccessFlags ? TextureAllocationFlag::GpuManaged : TextureAllocationFlag::GpuPrivate);
   if (!(finalDesc.BindFlags & (D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)))
     flags.set(TextureAllocationFlag::ShaderReadonly);
-  if (finalDesc.Usage == D3D11_USAGE_IMMUTABLE)
+  if (finalDesc.Usage == D3D11_USAGE_IMMUTABLE && (pInitialData || !InitOrder()))
     flags.set(TextureAllocationFlag::GpuReadonly);
   if (single_subresource && (finalDesc.BindFlags & D3D11_BIND_DEPTH_STENCIL)) {
     Rc<RenamableTexturePool> renamable = new RenamableTexturePool(texture.ptr(), 32, flags);

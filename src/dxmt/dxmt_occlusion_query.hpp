@@ -43,6 +43,12 @@ public:
     return next_offset;
   }
 
+  /* The encoder's last draws are counted, as far as it was told. */
+  bool
+  counting() {
+    return within_encoder && ~previous_offset;
+  }
+
   void
   endEncoder() {
     assert(within_encoder);
