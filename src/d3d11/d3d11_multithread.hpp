@@ -62,7 +62,9 @@ beside the lock, for what it can see of it: what SetMultithreadProtected and Get
 Setting it waits for nobody and changes nothing of the lock, but that a thread that turns it off lets go of what it has itself entered
 (no Leave would have, until now).
 
-A Leave lets go of what this thread has entered, whatever was set since. One that has entered nothing lets go of nothing.
+A Leave lets go of what this thread has entered, whatever was set since. One that has entered nothing lets go of nothing. So that each Leave
+is its own Enter's, a thread that is in it by an Enter enters again whatever was set since (by another thread): else the Leave of an Enter that
+held nothing would let go of the one around it.
 */
 class D3D11MultithreadOnce final : public ID3D11Multithread {
 public:
@@ -84,7 +86,7 @@ public:
   ULONG STDMETHODCALLTYPE Release() final { return container_->Release(); }
 
   void STDMETHODCALLTYPE Enter() final {
-    if (!asked_.on.load(std::memory_order_acquire))
+    if (!asked_.on.load(std::memory_order_acquire) && !(mutex_.owned() && asked_.entered))
       return;
     mutex_.lock();
     asked_.entered++;
