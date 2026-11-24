@@ -58,4 +58,8 @@ bool d3d11_device_mutex::try_lock() {
   return true;
 }
 
+bool d3d11_device_mutex::owned() {
+  return owner_.load(std::memory_order_relaxed) == uint32_t(dxmt::this_thread::get_id());
+}
+
 }; // namespace dxmt

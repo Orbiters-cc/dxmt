@@ -74,10 +74,13 @@ TraceLook(QueryTrace &trace, CommandQueue &queue, uint32_t generation, uint64_t 
   trace.looks++;
   if (!trace.first)
     trace.first = began;
-  if (hr == S_OK)
+  if (hr == S_OK) {
     TraceSeen(trace, queue, ended, 0);
-  else
-    trace.last = ended;
+    return;
+  }
+  trace.last = ended;
+  if (trace.sampled && trace.looks == kEventStallThreshold + 1)
+    otl_put(ended, OTL_D_QUERY_SEEN, 2, queue.otl_id_, trace.id << 32 | trace.generation, trace.first, trace.last, trace.looks, trace.event);
 }
 
 } // namespace dxmt

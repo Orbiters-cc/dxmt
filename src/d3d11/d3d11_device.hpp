@@ -65,6 +65,7 @@ public:
   virtual unsigned int GetDirectXVersion() = 0;
 
   d3d11_device_mutex mutex;
+  D3D11MultithreadOnce::Asked multithread_asked; // (with OBELISK_DXMT_QUERY_RESCUE=once alone: what the application set)
 };
 
 Com<IMTLDXGIDevice> CreateD3D11Device(std::unique_ptr<Device> &&device,

@@ -56,7 +56,10 @@ public:
       rasterizer_states_(this),
       depthstencil_states_(this),
       device_(device),
-      d3dmt_(static_cast<ID3D11Device *>(this), mutex) {
+      d3dmt_(static_cast<ID3D11Device *>(this), mutex),
+      d3dmt_once_(static_cast<ID3D11Device *>(this), mutex, multithread_asked) {
+    if (query_arm_.once)
+      mutex.set_protected(true); // before there is a second thread, and for good (D3D11MultithreadOnce)
     commandlist_pool_ = InitializeCommandListPool(this);
     pipeline_cache_ = InitializePipelineCache(this);
     context_ = InitializeImmediateContext(this, device_.queue(), query_arm_);
@@ -1120,6 +1123,7 @@ private:
   std::unique_ptr<MTLD3D11DeviceContextBase> context_;
   std::unique_ptr<MTLD3D10Device> d3d10_;
   D3D11Multithread d3dmt_;
+  D3D11MultithreadOnce d3dmt_once_;
 };
 
 /**
@@ -1195,7 +1199,10 @@ public:
     }
 
     if (riid == __uuidof(ID3D11Multithread)) {
-      *ppvObject = ref_and_cast<ID3D11Multithread>(&d3d11_device_.d3dmt_);
+      if (d3d11_device_.query_arm_.once)
+        *ppvObject = ref_and_cast<ID3D11Multithread>(&d3d11_device_.d3dmt_once_);
+      else
+        *ppvObject = ref_and_cast<ID3D11Multithread>(&d3d11_device_.d3dmt_);
       return S_OK;
     }
 

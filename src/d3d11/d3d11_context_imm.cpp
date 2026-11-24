@@ -699,15 +699,16 @@ whether or not anybody looks again. Uploads that are pending are owed too, but h
 them on the GPU, and the rescue thread commits them. That is the one thing of a rescue that may wait (for the GPU, at uploads, which wait for
 nothing of the application's), and the rescue thread does it holding no lock but the initializer's own; a context that ends has it done first.
 
-The rescue thread touches the context under the device's lock alone. Where the application did not ask for that lock
-(ID3D11Multithread), the context is its own thread's: the rescue thread then commits uploads and nothing else, and a full queue is the
-next look's. (An application that takes the protection back while a rescue is owed is not covered: none is owed once its queries are there.)
+The rescue thread touches the context under the device's lock alone, which is on for as long as the device is there, whatever the
+application sets (D3D11MultithreadOnce): whoever records is in it. What is owed is owed until the chunk of it was handed to the encoder,
+or the context ends.
 */
 class MTLD3D11ImmediateContextOnce : public MTLD3D11ImmediateContext {
 public:
   MTLD3D11ImmediateContextOnce(MTLD3D11Device *pDevice, CommandQueue &cmd_queue) :
       MTLD3D11ImmediateContext(pDevice, cmd_queue),
       locked_ext_(this, mutex),
+      d3dmt_once_(this, mutex, pDevice->multithread_asked),
       rescue_thread_([this]() { RescueThread(); }) {}
 
   ~MTLD3D11ImmediateContextOnce() { StopRescues(); }
@@ -717,6 +718,10 @@ public:
   QueryInterface(REFIID riid, void **ppvObject) override {
     if (ppvObject && (riid == __uuidof(IMTLD3D11ContextExt) || riid == __uuidof(IMTLD3D11ContextExt1))) {
       *ppvObject = ref(&locked_ext_);
+      return S_OK;
+    }
+    if (ppvObject && riid == __uuidof(ID3D11Multithread)) {
+      *ppvObject = ref(&d3dmt_once_);
       return S_OK;
     }
     return MTLD3D11ImmediateContext::QueryInterface(riid, ppvObject);
@@ -793,6 +798,18 @@ protected:
   /* For the timeline: what came of a look's rescue, or (`owed`) of the rescue thread's. */
   virtual void RescueTold(Rescue outcome, uint64_t chunk, uint64_t event_id, uint64_t before, uint64_t after, uint64_t began, bool owed) {}
 
+  /* For the timeline: the highest event that is owed grew to this (`event_id`; `since`: when the oldest of what is owed became so); or all
+   * that is owed up to it was handed over, up to `submitted`; or the context ends with it owed. */
+  enum class Debt { Accepted, Covered, Cancelled };
+  virtual void DebtTold(Debt what, Rescue why, uint64_t event_id, uint64_t submitted, uint64_t since) {}
+
+  /* The highest event that is owed, and since when the oldest is (0, 0: nothing is). */
+  std::pair<uint64_t, uint64_t>
+  Owed() {
+    std::lock_guard<dxmt::mutex> lock(owed_lock_);
+    return {owed_event_, owed_since_};
+  }
+
   /* Every event up to this one is in a chunk that was handed to the encoder: it will be signalled without another call. Not what was
    * reserved (GetCurrentEventSeqId), not what the GPU signalled (SignaledEventSeqId). */
   uint64_t
@@ -820,6 +837,8 @@ protected:
     }
     owed_wake_.notify_one();
     rescue_thread_.join();
+    if (owed_event_)
+      DebtTold(Debt::Cancelled, Rescue::Covered, owed_event_, SubmittedEventSeqId(), owed_since_);
   }
 
 private:
@@ -854,8 +873,8 @@ private:
       return RescueTold(Rescue::Covered, 0, event_id, submitted, submitted, began, false);
     // (the query's last End, under the lock every End is made under: what it was before is nobody's any more)
     const auto outcome = TryRescue([query] { return query->StalledAt(); }, began, false);
-    if ((outcome == Rescue::Lock || outcome == Rescue::Queue) && mutex.get_protected())
-      Owe(event_id, 0);
+    if (outcome == Rescue::Lock || outcome == Rescue::Queue)
+      Owe(event_id, 0, outcome);
   }
 
   /* Commits the current chunk if the marker of `target()` is in it. Waits for nothing. */
@@ -882,7 +901,7 @@ private:
       CommitRescue(initializer_event_id);
       if (uploads) {
         outcome = Rescue::Uploads;
-        Owe(0, initializer_event_id);
+        Owe(0, initializer_event_id, outcome);
       }
     }
     RescueTold(outcome, chunk, event_id, before, SubmittedEventSeqId(), began, owed);
@@ -891,13 +910,25 @@ private:
 
   /* The chunk with the marker of `event_id`, and the uploads up to `initializer_event_id`, are the rescue thread's to commit (0: none). */
   void
-  Owe(uint64_t event_id, uint64_t initializer_event_id) {
+  Owe(uint64_t event_id, uint64_t initializer_event_id, Rescue why) {
+    bool grew = false;
+    uint64_t since;
     {
       std::lock_guard<dxmt::mutex> lock(owed_lock_);
-      owed_event_ = std::max(owed_event_, event_id);
+      if (event_id > owed_event_) {
+        grew = true;
+        if (!owed_event_)
+          owed_since_ = otl_active() ? otl_now() : 0;
+        else if (event_id > taken_event_ && taken_event_ && !owed_since_next_)
+          owed_since_next_ = otl_active() ? otl_now() : 0;
+        owed_event_ = event_id;
+      }
       owed_uploads_ = std::max(owed_uploads_, initializer_event_id);
+      since = owed_since_;
     }
     owed_wake_.notify_one();
+    if (grew)
+      DebtTold(Debt::Accepted, why, event_id, SubmittedEventSeqId(), since);
   }
 
   void
@@ -915,16 +946,25 @@ private:
       }
       if (stopping_)
         return;
-      const uint64_t event_id = owed_event_;
+      const uint64_t event_id = taken_event_ = owed_event_;
+      owed_since_next_ = 0;
       lock.unlock();
-      auto outcome = Rescue::Covered;
-      if (mutex.get_protected())
-        outcome = TryRescue([event_id] { return event_id; }, otl_active() ? otl_now() : 0, true);
+      const auto outcome = TryRescue([event_id] { return event_id; }, otl_active() ? otl_now() : 0, true);
       lock.lock();
-      if (outcome == Rescue::Lock || outcome == Rescue::Queue)
+      if (outcome == Rescue::Lock || outcome == Rescue::Queue) {
         owed_wake_.wait_for(lock, std::chrono::microseconds(100), [this] { return stopping_ || owed_uploads_; });
-      else if (owed_event_ == event_id)
-        owed_event_ = 0;
+        continue;
+      }
+      // (handed over, by this or by someone before it: no other outcome ends what is owed)
+      const uint64_t since = owed_since_;
+      if (owed_event_ == event_id)
+        owed_event_ = owed_since_ = 0;
+      else
+        owed_since_ = owed_since_next_; // (owed meanwhile, with a later marker)
+      owed_since_next_ = taken_event_ = 0;
+      lock.unlock();
+      DebtTold(Debt::Covered, outcome, event_id, SubmittedEventSeqId(), since);
+      lock.lock();
     }
   }
 
@@ -964,11 +1004,14 @@ private:
   };
 
   LockedExt locked_ext_;
+  D3D11MultithreadOnce d3dmt_once_;
   std::atomic<uint64_t> submitted_event_seq_id_ = 0;
   dxmt::mutex owed_lock_; // (a leaf: nothing else is taken or waited for under it)
   dxmt::condition_variable owed_wake_;
   uint64_t owed_event_ = 0;
   uint64_t owed_uploads_ = 0;
+  uint64_t taken_event_ = 0;                        // what of it the rescue thread is at
+  uint64_t owed_since_ = 0, owed_since_next_ = 0;   // (the timeline's) since when the oldest is owed, and the oldest after what is taken
   bool stopping_ = false;
   dxmt::thread rescue_thread_; // (the last: what it uses is made)
 };
@@ -1092,8 +1135,11 @@ public:
         told_.stalled++;
       else
         told_.pending++;
-      if (quiet)
+      if (quiet) {
         told_.longest = std::max(told_.longest, ended - began);
+        told_.slow += ended - began >= 500000;
+        told_.slower += ended - began >= 5000000;
+      }
       due = ended - told_at_ > 200000000;
     }
     if (due)
@@ -1193,7 +1239,7 @@ protected:
       return;
     const uint64_t now = otl_now();
     if (outcome == Outcome::Done || outcome == Outcome::Uploads)
-      otl_put(now, OTL_D_STALL, 2 | (event_id > after) << 2 | 8 | owed << 4, this->cmd_queue.otl_id_, chunk, event_id, before, after,
+      otl_put(now, OTL_D_STALL, (event_id <= before) | 2 | (event_id > after) << 2 | 8 | owed << 4, this->cmd_queue.otl_id_, chunk, event_id, before, after,
               this->cmd_queue.otl_group_);
     std::lock_guard<dxmt::mutex> lock(told_lock_);
     switch (outcome) {
@@ -1209,13 +1255,28 @@ protected:
       break;
     case Outcome::Lock:
       told_.lock += !owed;
+      told_.tries += owed;
       break;
     case Outcome::Queue:
       told_.full += !owed;
+      told_.tries += owed;
       break;
     }
     if (!owed)
       told_.longest_rescue = std::max(told_.longest_rescue, now - began);
+  }
+
+  /* What is owed, as it is when a snapshot is told (without the switch nothing ever is). */
+  virtual std::pair<uint64_t, uint64_t> OwedNow() { return {0, 0}; }
+
+  void
+  OwedTold(uint32_t what, uint64_t event_id, uint64_t submitted, uint64_t since) {
+    if (!otl_active())
+      return;
+    otl_put(otl_now(), OTL_D_OWED, what, this->cmd_queue.otl_id_, event_id, submitted, since, 0, 0);
+    std::lock_guard<dxmt::mutex> lock(told_lock_);
+    told_.accepted += (what & 0xff) == 0;
+    told_.handed += (what & 0xff) == 1;
   }
 
   struct Looking {
@@ -1262,7 +1323,7 @@ protected:
 private:
   struct Counts {
     uint32_t ended[4] = {}, clean = 0, looks = 0, pending = 0, stalled = 0, there = 0, covered = 0, rescues = 0, owed = 0;
-    uint32_t lock = 0, full = 0, uploads = 0;
+    uint32_t lock = 0, full = 0, uploads = 0, tries = 0, accepted = 0, handed = 0, slow = 0, slower = 0;
     uint64_t longest = 0, longest_rescue = 0;
   };
 
@@ -1285,6 +1346,9 @@ private:
             c.clean | uint64_t(c.lock + c.full) << 32, c.pending | uint64_t(c.stalled) << 32, c.covered | uint64_t(c.there) << 32);
     otl_put(now, OTL_D_LOOKS, a, queue, group, c.looks | uint64_t(c.pending + c.stalled) << 32, c.there | uint64_t(c.rescues) << 32,
             few(c.lock, 0) | few(c.full, 16) | few(c.uploads, 32) | few(c.owed, 48), ns(c.longest) | ns(c.longest_rescue) << 32);
+    const auto [owed, since] = OwedNow();
+    otl_put(now, OTL_D_DEBTS, a, queue, group, c.accepted | uint64_t(c.handed) << 32, uint64_t(c.lock + c.full) | uint64_t(c.tries) << 32, owed,
+            ns(owed && now > since ? now - since : 0) | few(c.slow, 32) | few(c.slower, 48));
   }
 
   dxmt::mutex told_lock_; // (a leaf)
@@ -1310,6 +1374,16 @@ protected:
   void
   RescueTold(Rescue outcome, uint64_t chunk, uint64_t event_id, uint64_t before, uint64_t after, uint64_t began, bool owed) override {
     RescueOutcome(outcome, chunk, event_id, before, after, began, owed);
+  }
+
+  void
+  DebtTold(Debt what, Rescue why, uint64_t event_id, uint64_t submitted, uint64_t since) override {
+    OwedTold(uint32_t(what) | (why == Rescue::Lock ? 1 : why == Rescue::Queue ? 2 : 0) << 8, event_id, submitted, since);
+  }
+
+  std::pair<uint64_t, uint64_t>
+  OwedNow() override {
+    return Owed();
   }
 };
 

@@ -70,7 +70,7 @@ static inline void dxmt_otl_stop(uint32_t) {}
 static inline uint64_t otl_attachment(uint32_t, uint32_t, uint32_t, uint32_t, int, int, uint32_t, uint32_t) { return 0; }
 enum {
   OTL_D_READY, OTL_D_ENCODE, OTL_D_DONE, OTL_D_SIGNAL, OTL_D_SEOC, OTL_D_INIT, OTL_D_COMMIT, OTL_D_PASS_ENDED,
-  OTL_D_STALL, OTL_D_QUERIES, OTL_D_QUERY, OTL_D_QUERY_SEEN, OTL_D_LOOKS,
+  OTL_D_STALL, OTL_D_QUERIES, OTL_D_QUERY, OTL_D_QUERY_SEEN, OTL_D_LOOKS, OTL_D_DEBTS, OTL_D_OWED,
   OTL_H_A, OTL_H_B, OTL_H_C, OTL_H_D,
 };
 enum otl_why {
