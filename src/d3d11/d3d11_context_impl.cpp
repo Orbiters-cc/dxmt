@@ -4369,13 +4369,13 @@ public:
   bool
   InvalidateCurrentPass(bool defer_commit = false, uint32_t why = OTL_WHY_OTHER) {
     if (otl_active()) {
-      otl_why_ = why;
+      otl_why_ = why != OTL_WHY_OTHER ? why : otl_call;
       otl_open_ = cmdbuf_state == CommandBufferState::RenderEncoderActive ||
                   cmdbuf_state == CommandBufferState::RenderPipelineReady ||
                   cmdbuf_state == CommandBufferState::TessellationRenderPipelineReady ||
                   cmdbuf_state == CommandBufferState::GeometryRenderPipelineReady;
       if (otl_open_)
-        otlPassEnded(why);
+        otlPassEnded(otl_why_);
     }
     switch (cmdbuf_state) {
     case CommandBufferState::Idle:
@@ -5334,7 +5334,6 @@ public:
   }
 
   void STDMETHODCALLTYPE TemporalUpscale(const MTL_TEMPORAL_UPSCALE_D3D11_DESC *pDesc) final {
-    auto lock = LockForRescue(ctx_->mutex);
     Rc<Texture> input, output, depth, motion_vector, exposure;
     if (!(input = static_cast<D3D11ResourceCommon *>(pDesc->Color)->texture()))
       return;
@@ -5474,14 +5473,12 @@ public:
   }
 
   void STDMETHODCALLTYPE BeginUAVOverlap() final {
-    auto lock = LockForRescue(ctx_->mutex);
     ctx_->EmitOP([](ArgumentEncodingContext &enc) {
       enc.setIntrapassBarrierControl(kIntrapassControlBitIgnoreUAVWaW);
     });
   }
 
   void STDMETHODCALLTYPE EndUAVOverlap() final {
-    auto lock = LockForRescue(ctx_->mutex);
     ctx_->EmitOP([](ArgumentEncodingContext &enc) {
       enc.setIntrapassBarrierControl(0);
     });
@@ -5560,6 +5557,7 @@ public:
     visibility_query_count = 0;
     issued_visibility_query.clear();
     issued_event_query.clear();
+    event_markers.clear();
     issued_timestamp_query.clear();
     list.reset();
     staging_allocator.free_blocks(~0uLL);
@@ -5644,6 +5642,7 @@ public:
   uint32_t visibility_query_count = 0;
   std::vector<std::pair<Com<MTLD3D11OcclusionQuery>, uint32_t>> issued_visibility_query;
   std::vector<Com<MTLD3D11EventQuery>> issued_event_query;
+  std::vector<Com<MTLD3D11EventQuery>> event_markers; // (MTLD3D11DeferredContextOnce)
   std::vector<Com<MTLD3D11TimestampQuery>> issued_timestamp_query;
 
 private:

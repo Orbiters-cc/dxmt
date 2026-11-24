@@ -3,6 +3,7 @@
 
 #include "d3d11_device.hpp"
 #include "d3d11_device_child.hpp"
+#include "d3d11_query_rescue.hpp"
 
 namespace dxmt {
 
@@ -12,10 +13,10 @@ using MTLD3D11DeviceContextBase =
 class CommandQueue;
 
 std::unique_ptr<MTLD3D11DeviceContextBase>
-InitializeImmediateContext(MTLD3D11Device *device, CommandQueue& cmd_queue);
+InitializeImmediateContext(MTLD3D11Device *device, CommandQueue& cmd_queue, QueryArm arm);
 
 Com<MTLD3D11DeviceContextBase>
-CreateDeferredContext(MTLD3D11Device *pDevice, UINT ContextFlags);
+CreateDeferredContext(MTLD3D11Device *pDevice, UINT ContextFlags, QueryArm arm);
 
 class MTLD3D11CommandListPoolBase {
 public:

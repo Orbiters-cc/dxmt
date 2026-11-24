@@ -836,6 +836,22 @@ public:
 
   void sampleTimestamp(Rc<TimestampQuery> &&query);
 
+  /* The events of the command list that is executed, of this execution (with OBELISK_DXMT_QUERY_RESCUE=once alone). */
+  void
+  pushDeferredEvents(const uint64_t *list) {
+    deferred_event_stack_.push_back(list);
+  }
+  void
+  popDeferredEvents() {
+    assert(!deferred_event_stack_.empty());
+    deferred_event_stack_.pop_back();
+  }
+  uint64_t
+  currentDeferredEvent(uint32_t index) {
+    assert(!deferred_event_stack_.empty());
+    return deferred_event_stack_.back()[index];
+  }
+
   void barrierOnQueue(WMT::CommandBuffer cmdbuf) {
     barrier_index_++;
     cmdbuf.encodeSignalEvent(barrier_event_, barrier_index_);
@@ -956,6 +972,7 @@ private:
   Flags<FeatureCompatibility> compatibility_flag_;
   TimestampQueryState timestamp_state_;
   std::vector<Rc<VisibilityResultQuery> *> deferred_visibility_query_stack_;
+  std::vector<const uint64_t *> deferred_event_stack_;
 
   WMT::Reference<WMT::Event> barrier_event_;
   uint64_t barrier_index_ = 0;

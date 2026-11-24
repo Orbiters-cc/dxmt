@@ -472,15 +472,47 @@ public:
     return DXGI_ERROR_INVALID_CALL;
   }
 
-private:
+protected:
   DeferredContextInternalState ctx_state;
   null_mutex mutex;
   std::atomic<uint32_t> refcount = 0;
   UINT context_flag;
 };
 
+/**
+With OBELISK_DXMT_QUERY_RESCUE=once, an event or disjoint query ended in a command list is signalled where it was ended in it: each
+execution of the list gives it an event of its own (MTLD3D11ImmediateContextOnce::ExecuteCommandList), which the list signals at that
+place. (Without it, the query is ended as the list begins to be executed: before the list's own work, and where the immediate
+context has nothing new, at an event that may have been signalled long ago.)
+*/
+class MTLD3D11DeferredContextOnce : public MTLD3D11DeferredContext {
+public:
+  using MTLD3D11DeferredContext::MTLD3D11DeferredContext;
+
+  void
+  STDMETHODCALLTYPE
+  End(ID3D11Asynchronous *pAsync) override {
+    if (unlikely(!pAsync))
+      return;
+
+    D3D11_QUERY_DESC desc;
+    ((ID3D11Query *)pAsync)->GetDesc(&desc);
+    if (desc.Query != D3D11_QUERY_EVENT && desc.Query != D3D11_QUERY_TIMESTAMP_DISJOINT)
+      return MTLD3D11DeferredContext::End(pAsync);
+
+    auto &markers = ctx_state.current_cmdlist->event_markers;
+    const uint32_t index = markers.size();
+    markers.push_back(static_cast<MTLD3D11EventQuery *>(pAsync));
+    InvalidateCurrentPass(true);
+    EmitOP([index](ArgumentEncodingContext &enc) { enc.signalEvent(enc.currentDeferredEvent(index)); });
+    promote_flush = true;
+  }
+};
+
 Com<MTLD3D11DeviceContextBase>
-CreateDeferredContext(MTLD3D11Device *pDevice, UINT ContextFlags) {
+CreateDeferredContext(MTLD3D11Device *pDevice, UINT ContextFlags, QueryArm arm) {
+  if (arm.once)
+    return new MTLD3D11DeferredContextOnce(pDevice, ContextFlags);
   return new MTLD3D11DeferredContext(pDevice, ContextFlags);
 }
 

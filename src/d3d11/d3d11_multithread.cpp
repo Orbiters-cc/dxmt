@@ -28,16 +28,6 @@ void d3d11_device_mutex::lock() {
   }
   counter_++;
 }
-bool d3d11_device_mutex::try_lock() {
-  if (!protected_)
-    return true;
-  uint32_t tid = dxmt::this_thread::get_id();
-  uint32_t expected = 0;
-  if (!owner_.compare_exchange_strong(expected, tid, std::memory_order_acquire) && expected != tid)
-    return false;
-  counter_++;
-  return true;
-}
 void d3d11_device_mutex::unlock() noexcept {
   if (!protected_)
     return;
@@ -56,5 +46,16 @@ bool d3d11_device_mutex::set_protected(bool Protected) {
   return ret;
 }
 bool d3d11_device_mutex::get_protected() { return protected_; }
+
+bool d3d11_device_mutex::try_lock() {
+  if (!protected_)
+    return true;
+  uint32_t tid = dxmt::this_thread::get_id();
+  uint32_t expected = 0;
+  if (!owner_.compare_exchange_strong(expected, tid, std::memory_order_acquire) && expected != tid)
+    return false;
+  counter_++;
+  return true;
+}
 
 }; // namespace dxmt

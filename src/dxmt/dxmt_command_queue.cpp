@@ -100,8 +100,7 @@ CommandQueue::CommitCurrentChunk() {
   auto chunk_id = ready_for_encode.load(std::memory_order_relaxed);
   auto &chunk = chunks[chunk_id % kCommandChunkCount];
   chunk.chunk_id = chunk_id;
-  const uint64_t event_id = GetNextEventSeqId();
-  chunk.chunk_event_id = event_id;
+  chunk.chunk_event_id = GetNextEventSeqId();
   chunk.frame_ = frame_count;
   chunk.resource_initializer_event_id = initializer.flushToWait();
   auto& statistics = CurrentFrameStatistics();
@@ -114,7 +113,6 @@ CommandQueue::CommitCurrentChunk() {
 #if ASYNC_ENCODING
   ready_for_encode.fetch_add(1, std::memory_order_release);
   ready_for_encode.notify_one();
-  submitted_event_seq_id.store(event_id, std::memory_order_release); // (the chunk is the encoder's: no more of it here)
 
   auto t0 = clock::now();
   chunk_ongoing.wait(kCommandChunkCount - 1, std::memory_order_acquire);
@@ -124,7 +122,39 @@ CommandQueue::CommitCurrentChunk() {
 
 #else
   CommitChunkInternal(chunk, ready_for_encode.fetch_add(1, std::memory_order_relaxed));
-  submitted_event_seq_id.store(event_id, std::memory_order_release);
+#endif
+
+  cpu_command_allocator.free_blocks(cpu_coherent.signaledValue());
+}
+
+/* (kept beside the function above, not shared with it, so that nothing of a rescue is in what every other commit runs) */
+void
+CommandQueue::CommitCurrentChunkAfter(uint64_t resource_initializer_event_id) {
+  auto chunk_id = ready_for_encode.load(std::memory_order_relaxed);
+  auto &chunk = chunks[chunk_id % kCommandChunkCount];
+  chunk.chunk_id = chunk_id;
+  chunk.chunk_event_id = GetNextEventSeqId();
+  chunk.frame_ = frame_count;
+  chunk.resource_initializer_event_id = resource_initializer_event_id;
+  auto& statistics = CurrentFrameStatistics();
+  statistics.command_buffer_count++;
+  if (otl_active()) {
+    chunk.otl_recorded_ = otl_passes && otl_group_ % otl_passes == 0;
+    otl_put(otl_now(), OTL_D_READY, chunk.otl_recorded_, otl_id_, chunk_id, chunk.resource_initializer_event_id, otl_group_,
+            0, 0);
+  }
+#if ASYNC_ENCODING
+  ready_for_encode.fetch_add(1, std::memory_order_release);
+  ready_for_encode.notify_one();
+
+  auto t0 = clock::now();
+  chunk_ongoing.wait(kCommandChunkCount - 1, std::memory_order_acquire);
+  chunk_ongoing.fetch_add(1, std::memory_order_relaxed);
+  auto t1 = clock::now();
+  statistics.commit_interval += (t1 - t0);
+
+#else
+  CommitChunkInternal(chunk, ready_for_encode.fetch_add(1, std::memory_order_relaxed));
 #endif
 
   cpu_command_allocator.free_blocks(cpu_coherent.signaledValue());

@@ -54,6 +54,7 @@ struct otl_samples;
 static const int otl_passes = 0;
 static inline int otl_active(void) { return 0; }
 static inline uint64_t otl_now(void) { return 0; }
+static inline uint64_t otl_id(void) { return 0; }
 static inline void otl_init(const char *) {}
 static inline void otl_put(uint64_t, uint16_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {}
 static inline void otl_hist(int, uint64_t) {}
@@ -69,7 +70,7 @@ static inline void dxmt_otl_stop(uint32_t) {}
 static inline uint64_t otl_attachment(uint32_t, uint32_t, uint32_t, uint32_t, int, int, uint32_t, uint32_t) { return 0; }
 enum {
   OTL_D_READY, OTL_D_ENCODE, OTL_D_DONE, OTL_D_SIGNAL, OTL_D_SEOC, OTL_D_INIT, OTL_D_COMMIT, OTL_D_PASS_ENDED,
-  OTL_D_STALL, OTL_D_QUERIES,
+  OTL_D_STALL, OTL_D_QUERIES, OTL_D_QUERY, OTL_D_QUERY_SEEN, OTL_D_LOOKS,
   OTL_H_A, OTL_H_B, OTL_H_C, OTL_H_D,
 };
 enum otl_why {
@@ -87,6 +88,15 @@ enum otl_stop {
 #endif
 
 #ifdef __cplusplus
+/* What ends a pass or commits a chunk on this thread where nothing nearer says it (enum otl_why): the call it is in, set by
+ * TimedImmediateContext (d3d11_context_imm.cpp) alone and read while the timeline is on. */
+inline thread_local uint32_t otl_call = 0;
+struct OtlCall {
+  const uint32_t former = otl_call;
+  explicit OtlCall(uint32_t why) { otl_call = why; }
+  ~OtlCall() { otl_call = former; }
+};
+
 /* Waits for a pipeline as `ready.wait(false)` does; the timeline says how long when it had to. */
 template <typename Ready>
 inline void

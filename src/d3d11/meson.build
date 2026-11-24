@@ -6,6 +6,7 @@ d3d11_src = [
   'd3d11_input_layout.cpp',
   'd3d11_inspection.cpp',
   'd3d11_query.cpp',
+  'd3d11_query_rescue.cpp',
   'd3d11_shader.cpp',
   'd3d11_state_object.cpp',
   'd3d11_swapchain.cpp',

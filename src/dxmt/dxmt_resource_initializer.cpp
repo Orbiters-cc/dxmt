@@ -416,6 +416,29 @@ ResourceInitializer::flushToWait() {
   return flushInternal();
 }
 
+uint64_t
+ResourceInitializer::reserveToWait(bool &owed) {
+  std::unique_lock<dxmt::mutex> lock(mutex_, std::try_to_lock);
+  if (!lock.owns_lock()) {
+    // An initialization that returned was put in the command buffer of this id, or of one before it. (That one may turn out empty.)
+    owed = true;
+    return current_seq_id_;
+  }
+  owed = !idle();
+  if (owed)
+    return current_seq_id_;
+  if (cached_coherent_seq_id != current_seq_id_ - 1)
+    cached_coherent_seq_id = upload_queue_event_.signaledValue();
+  return cached_coherent_seq_id == current_seq_id_ - 1 ? 0 : current_seq_id_ - 1;
+}
+
+void
+ResourceInitializer::flushThrough(uint64_t event_id) {
+  std::lock_guard<dxmt::mutex> lock(mutex_);
+  if (current_seq_id_ <= event_id)
+    flushInternal();
+}
+
 void
 ResourceInitializer::reset() {
   cpu_command_heap_offset = 0;

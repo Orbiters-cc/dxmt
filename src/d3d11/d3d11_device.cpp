@@ -59,7 +59,7 @@ public:
       d3dmt_(static_cast<ID3D11Device *>(this), mutex) {
     commandlist_pool_ = InitializeCommandListPool(this);
     pipeline_cache_ = InitializePipelineCache(this);
-    context_ = InitializeImmediateContext(this, device_.queue());
+    context_ = InitializeImmediateContext(this, device_.queue(), query_arm_);
     d3d10_ = std::make_unique<MTLD3D10Device>(this, context_.get());
     is_traced_ = !!::GetModuleHandle("dxgitrace.dll");
     format_inspector_.Inspect(GetMTLDevice());
@@ -960,17 +960,14 @@ public:
 
     switch (pQueryDesc->Query) {
     case D3D11_QUERY_EVENT:
-      *ppQuery = ref(new MTLD3D11EventQueryImpl<BOOL>(this, pQueryDesc));
-      return S_OK;
+      return CreateEventQuery(this, pQueryDesc, query_arm_, ppQuery);
     case D3D11_QUERY_OCCLUSION:
     case D3D11_QUERY_OCCLUSION_PREDICATE:
       return CreateOcclusionQuery(this, pQueryDesc, ppQuery);
     case D3D11_QUERY_TIMESTAMP:
       return CreateTimestampQuery(this, pQueryDesc, ppQuery);
-    case D3D11_QUERY_TIMESTAMP_DISJOINT: {
-      *ppQuery = ref(new MTLD3D11EventQueryImpl<D3D11_QUERY_DATA_TIMESTAMP_DISJOINT>(this, pQueryDesc));
-      return S_OK;
-    }
+    case D3D11_QUERY_TIMESTAMP_DISJOINT:
+      return CreateEventQuery(this, pQueryDesc, query_arm_, ppQuery);
     case D3D11_QUERY_PIPELINE_STATISTICS: {
       *ppQuery = ref(new MTLD3D11DummyQuery<D3D11_QUERY_DATA_PIPELINE_STATISTICS>(this, pQueryDesc));
       return S_OK;
@@ -988,7 +985,7 @@ public:
 
   HRESULT STDMETHODCALLTYPE CreateDeferredContext3(
     UINT ContextFlags, ID3D11DeviceContext3 **ppDeferredContext) override {
-    *ppDeferredContext = std::move(dxmt::CreateDeferredContext(this, ContextFlags));
+    *ppDeferredContext = std::move(dxmt::CreateDeferredContext(this, ContextFlags, query_arm_));
     return S_OK;
   }
 
@@ -1119,6 +1116,7 @@ private:
 
   Device& device_;
   /** ensure destructor called first */
+  const QueryArm query_arm_ = ChooseQueryArm(); // (its queue is made: the timeline is on or it is not)
   std::unique_ptr<MTLD3D11DeviceContextBase> context_;
   std::unique_ptr<MTLD3D10Device> d3d10_;
   D3D11Multithread d3dmt_;

@@ -1,14 +1,7 @@
 #include "d3d11_query.hpp"
 #include "dxmt_occlusion_query.hpp"
-#include "util_env.hpp"
 
 namespace dxmt {
-
-bool
-QueryRescueOnce() {
-  static const bool once = env::getEnvVar("OBELISK_DXMT_QUERY_RESCUE") == "once";
-  return once;
-}
 
 class OcclusionQuery : public MTLD3DQueryBase<MTLD3D11OcclusionQuery> {
   using MTLD3DQueryBase<MTLD3D11OcclusionQuery>::MTLD3DQueryBase;

@@ -172,7 +172,6 @@ private:
   std::atomic_uint64_t chunk_ongoing = 0;
   CpuFence cpu_coherent;
   CpuFence frame_latency_fence_;
-  std::atomic_uint64_t submitted_event_seq_id = 0;
   std::atomic_bool stopped;
 
   std::array<CommandChunk, kCommandChunkCount> chunks;
@@ -249,21 +248,6 @@ public:
     return event.signaledValue();
   };
 
-  /**
-  Every event up to this one is in a chunk that was handed to the encoder: it will be signalled without another call. Not what
-  was reserved (GetCurrentEventSeqId), not what the GPU signalled (SignaledEventSeqId).
-  */
-  uint64_t
-  SubmittedEventSeqId() {
-    return submitted_event_seq_id.load(std::memory_order_acquire);
-  }
-
-  /** CommitCurrentChunk would wait for the GPU to be done with a chunk first. */
-  bool
-  CommitWaits() {
-    return chunk_ongoing.load(std::memory_order_acquire) >= kCommandChunkCount - 1;
-  }
-
   obj_handle_t GetSharedEventListener() {
     return shared_event_listener;
   }
@@ -274,6 +258,20 @@ public:
 
   */
   void CommitCurrentChunk();
+
+  /**
+  CommitCurrentChunk would wait for the GPU to be done with a chunk first. Nobody but its caller can make it so meanwhile.
+  */
+  bool
+  CommitWaits() {
+    return chunk_ongoing.load(std::memory_order_acquire) >= kCommandChunkCount - 1;
+  }
+
+  /**
+  CommitCurrentChunk with what ResourceInitializer::reserveToWait gave in place of flushToWait(), which may wait for the upload
+  queue; where !CommitWaits(), it waits for nothing.
+  */
+  void CommitCurrentChunkAfter(uint64_t resource_initializer_event_id);
 
   uint64_t CurrentFrameSeq() {
     return frame_count + 1;

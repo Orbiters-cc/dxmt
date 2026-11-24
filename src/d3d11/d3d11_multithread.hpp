@@ -7,6 +7,7 @@ namespace dxmt {
 class d3d11_device_mutex {
 public:
   void lock();
+  /* Never waits. (Not protected, as lock(): nothing is locked, and true.) */
   bool try_lock();
   void unlock() noexcept;
 

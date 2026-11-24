@@ -4,7 +4,6 @@
 #include "dxmt_occlusion_query.hpp"
 #include "log/log.hpp"
 #include "../d3d10/d3d10_query.hpp"
-#include <mutex>
 
 namespace dxmt {
 
@@ -118,32 +117,9 @@ enum class EventState {
 
 constexpr size_t kEventStallThreshold = 64;
 
-/**
-OBELISK_DXMT_QUERY_RESCUE=once in the environment, read once per process; anything else, or nothing, is off.
-
-Off: an event or disjoint query that was not there kEventStallThreshold looks in a row flushes at each look from then on,
-whatever its caller asked for with D3D11_ASYNC_GETDATA_DONOTFLUSH, until the GPU has signalled it.
-
-Once: such a look flushes only while the query's marker is in a chunk that has not been handed to the encoder (a caller that does
-nothing but look would wait forever); from there on the marker reaches the GPU by itself, and the look says S_FALSE.
-*/
-bool QueryRescueOnce();
-
-/* The device's lock, taken with the switch above and not without it. */
-template <typename Mutex>
-std::unique_lock<Mutex>
-LockForRescue(Mutex &mutex) {
-  std::unique_lock<Mutex> lock(mutex, std::defer_lock);
-  if (QueryRescueOnce())
-    lock.lock();
-  return lock;
-}
-
 struct MTLD3D11EventQuery : public ID3D11Query1 {
   virtual void Issue(uint64_t current_seq_id) = 0;
   virtual EventState CheckEventState(uint64_t coherent_seq_id) = 0;
-  /* The event the query was last issued with, while looks at it stall; 0 otherwise. */
-  virtual uint64_t StalledEventSeqId() = 0;
 };
 
 template <typename DataType>
@@ -177,10 +153,6 @@ public:
     }
     return EventState::Stall;
   };
-
-  uint64_t StalledEventSeqId() override {
-    return state == QueryState::Issued && stall_counter == ~0u ? should_be_signaled_at : 0;
-  }
 
 private:
   QueryState state = QueryState::Undefined;

@@ -22,6 +22,7 @@
 #include "dxmt_context.hpp"
 #include "dxmt_ring_bump_allocator.hpp"
 #include "dxmt_texture.hpp"
+#include <atomic>
 
 namespace dxmt {
 
@@ -55,6 +56,16 @@ public:
    * 0 may be returned, meaning no work to wait
    */
   uint64_t flushToWait();
+
+  /*
+   * For a chunk that may not wait for anything on the CPU: the event id that every initialization made so far is done by, 0 for none. Never
+   * waits, neither for whoever initializes a resource or flushes meanwhile nor for a command buffer of the upload queue. `owed`: its
+   * command buffer is not committed, and is not by anything that is already under way: flushThrough() has to be called.
+   */
+  uint64_t reserveToWait(bool &owed);
+
+  /* What reserveToWait() said is owed, even where nothing is pending: commits a command buffer of the upload queue, which may wait. */
+  void flushThrough(uint64_t event_id);
 
   void
   wait(uint64_t seq_id, uint64_t timeout = -1) {
@@ -139,7 +150,7 @@ private:
 
   bool retainAllocation(Allocation *allocation);
 
-  uint64_t current_seq_id_ = 1;
+  std::atomic<uint64_t> current_seq_id_ = 1; // (changed under the mutex alone; reserveToWait reads it without)
   uint64_t cached_coherent_seq_id = 0;
   WMT::Device device_;
   WMT::Reference<WMT::CommandQueue> upload_queue_;
